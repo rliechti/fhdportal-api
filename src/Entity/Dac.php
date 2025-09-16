@@ -57,6 +57,7 @@ if (!function_exists("getDatasetPolicy")){
                 ]
             )
         );
+        
         $statusCode = $response->getStatusCode();
         if ($statusCode === 200){
             $content = $response->toArray();
@@ -64,7 +65,11 @@ if (!function_exists("getDatasetPolicy")){
             // condition for json-server based fake DAC
             $data = (isset($content['data'])) ? $content['data'] : $content;
             foreach($data as $d){
-                if (isset($d['dataset']) && isset($d['dataset']['id']) && $d['dataset']['id'] == $dataset_id){
+                if (!isset($d['datasetID'])){
+                    $d['datasetID'] = (isset($d['dataset']) && isset($d['dataset']['id'])) ? $d['dataset']['id'] : "";
+                }
+                
+                if ($d['datasetID'] == $dataset_id){
                    $policy['id']  = $d['policyID'];
                    $policy['status'] = $d['status'];
                    $policy['submission_id'] = $d['id'];
