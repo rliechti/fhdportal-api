@@ -1,0 +1,23 @@
+nelmio_api_doc:
+    documentation:
+        info:
+            title: 'FEGA Switzerland API'
+            description: 'API documentation for the Swiss node of the Federated EGA (European Genome-phenome Archive).'
+            version: '0.0.1'
+        openapi: 3.1.0
+        components:
+            securitySchemes:
+                # bearerAuth:
+                #     type: http
+                #     scheme: bearer
+                #     bearerFormat: JWT
+                openId:
+                    type: openIdConnect
+                    openIdConnectUrl: https://sso.sib.swiss/realms/fega_test/.well-known/openid-configuration
+        security:
+            # - bearerAuth: []
+            - openId: []
+    areas:
+        default:
+            path_patterns: ['^/((?!_error)(?!users)(?!roles).)*$']
+            host_patterns: []
