@@ -1,0 +1,64 @@
+
+### Project ###
+
+# FAKE SDA
+/sda
+
+# Dependencies
+/vendor/
+tools/vendor
+tools/local_version
+
+# Configuration
+/config/secrets/prod/prod.decrypt.private.php
+
+# Environment
+/.env.local
+/.env.local.php
+/.env.*.local
+.env
+
+# Transient files
+/var/
+
+# Assets
+/public/bundles/
+
+
+### IDE ###
+
+# VisualStudioCode
+.vscode/*
+!.vscode/settings.json
+!.vscode/tasks.json
+!.vscode/launch.json
+!.vscode/extensions.json
+!.vscode/*.code-snippets
+
+
+### Operating System ###
+
+# Linux
+*~
+*.local
+.cache
+.directory
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Windows
+Thumbs.db
+ehthumbs.db
+[Dd]esktop.ini
+*.lnk
+*.stackdump
+
+# Data
+data
+
+# Logs
+logs
+
