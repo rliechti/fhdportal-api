@@ -164,7 +164,7 @@ class Keycloak
             // $user = $this->introspectToken();
             $user = Token::getPayload($encodedToken);
             if (strpos($user['preferred_username'],'service-account-') === FALSE){
-                $dbUser = DB::queryFirstRow("SELECT * from \"user\" where external_id = %s", $user['preferred_username']);
+                $dbUser = DB::queryFirstRow("SELECT * from \"user\" where external_id = %s_preferred_username or email = %s_email", $user);
                 $propertyKeys = array(
                     "sub",
                     "realm_access",
@@ -191,8 +191,8 @@ class Keycloak
                     );
                     DB::insert('user', $dbUser);
                     $dbUser['id'] = DB::insertId();
-                } elseif ($dbUser['email'] != $user['email'] || $dbUser['properties'] != json_encode($properties)) {
-                    DB::update("user", array("email" => $user['email'],"properties" => json_encode($properties)), "external_id = %s", $user['preferred_username']);
+                } elseif ($dbUser['email'] != $user['email'] || $dbUser['external_id'] != $user['preferred_username'] || $dbUser['properties'] != json_encode($properties)) {
+                    DB::update("user", array("email" => $user['email'],"properties" => json_encode($properties),"external_id" => $user['preferred_username']), "id = %s_id", $dbUser);
                 }                
                 $this->id = +$dbUser['id'];
             }
