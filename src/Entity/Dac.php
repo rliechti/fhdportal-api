@@ -306,7 +306,7 @@ if (!function_exists("getDatasetPolicy")){
                 )
             );
             $statusCode = $response->getStatusCode();
-            if ($statusCode !== 200){
+            if (+$statusCode < 200 || +$statusCode >= 300 ){
                 throw new Exception(json_encode($response->toArray()), $statusCode);
             }
 
