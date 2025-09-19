@@ -159,9 +159,17 @@ class SubmissionController extends AbstractController
     }
 
     #[OA\Get(
-        path: '/api/cli',
+        path: '/api/cli/{binary}',
         summary: 'Download cli package',
         tags: ['CLI'],
+        parameters: [
+            new OA\Parameter(
+                name: 'binary',
+                in: 'path',
+                required: true,
+                schema: new OA\Schema(type: 'string')
+            )
+        ],
         responses: [
             new OA\Response(
                 response: 200,
@@ -170,10 +178,10 @@ class SubmissionController extends AbstractController
             )
         ]
     )]
-    #[Route('/cli', name: 'download_cli', methods: ['GET'])]
-    public function downloadCli(Request $request): BinaryFileResponse
+    #[Route('/cli/{binary}', name: 'download_cli', methods: ['GET'])]
+    public function downloadCli(Request $request, string $binary): BinaryFileResponse
     {
-        $filepath = dirname(dirname(__DIR__))."/tools/fega-cli.zip";    
+        $filepath = dirname(dirname(__DIR__))."/tools/fega-cli/".$binary;    
         if (!file_exists($filepath)){
             return new JsonResponse(['message' => 'File not found'], 404);
         }
