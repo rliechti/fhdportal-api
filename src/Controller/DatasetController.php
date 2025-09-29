@@ -225,13 +225,12 @@ class DatasetController extends AbstractController
 	sda_files.properties
 FROM
 	dataset_view
-	inner join relationship_view on dataset_view.id = relationship_view.domain_resource_id
-	inner join resource on relationship_view.range_resource_id = resource.id and resource.status_type_id = '".$status."'
-	inner join relationship_view as file_relationship on resource.id = file_relationship.range_resource_id
-	inner join resource as sda_files on file_relationship.domain_resource_id = sda_files.id and sda_files.status_type_id = '".$status."'
+	inner join relationship  on dataset_view.id = relationship.range_resource_id
+	inner join relationship as sda_relationship on relationship.domain_resource_id = sda_relationship.range_resource_id
+	inner join resource as sda_files on sda_files.id = sda_relationship.domain_resource_id and sda_files.status_type_id = '".$status."'
 	inner join resource_type as sda_file_type on sda_files.resource_type_id = sda_file_type.id and sda_file_type.name = 'SdaFile'
 WHERE
-	dataset_view.public_id = %s",$dataset_id);
+	dataset_view.status_type_id = '".$status."' and dataset_view.public_id = %s;",$dataset_id);
        $dataset['files'] = array_map("json_decode",$dataset['files']);
        
        // format dataset for DAC //

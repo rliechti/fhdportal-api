@@ -570,12 +570,12 @@ class SubmissionController extends AbstractController
                     // register SDA files
                     $sdafiles = \DB::query("SELECT sdafile_public_id, dataset_public_id, study_public_id  from sdafile_study_dataset_view where ".$field." = %s and dataset_public_id is not null",$study_id);
                     
-                    // $_SERVER['MQ_HOST'] is  not set for the standalone demonstrator //
-                    
+                    // $_SERVER['MQ_HOST'] is  not set for the standalone demonstrator //                    
                     if ($sdafiles && isset($_SERVER['MQ_HOST'])){
                         $rabbitmq = new \App\Service\RabbitMq\RabbitMq;
                         $file_submission_result = $rabbitmq->mapSDAfiles($sdafiles);
                     }
+                    
                     // register DAC
                     $datasets = \DB::query("SELECT id as dataset_id, properties->>'policy_id' as policy_id, study_id from dataset_view where ".$field." = %s",$study_id);
                     foreach($datasets as $d){
