@@ -220,10 +220,10 @@ function loopOnResources($verbose, $logs, $types, $metadata, $package_dir, $outp
             foreach($output as $idx=>$o){
                 if ($o['status']!='SUCCESS') {
                     return array('status'=>'FAIL','message'=>"ERROR during $type import. File ".$metadata[$type] ." : line ".($idx+1) ."\n",'data'=>json_encode($o));
-                } elseif (isset($o['alias'])) {
-                    $tmp_titles[] = $o['alias'];
                 } elseif (isset($o['title'])) {
                     $tmp_titles[] = $o['title'];
+                } elseif (isset($o['alias'])) {
+                    $tmp_titles[] = $o['alias'];
                 }
                 $all_titles[$type] = $tmp_titles;
                 file_put_contents($tmp_file,json_encode($all_titles));          
