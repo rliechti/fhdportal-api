@@ -2,197 +2,154 @@
 
 namespace App\Controller;
 
-use App\Repository\ResourceRepository;
-use App\Repository\ResourceTypeRepository;
-use App\Repository\StatusTypeRepository;
 use App\Service\Auth\Keycloak;
+use App\Service\Dac\DacRequestService;
 use App\Service\JsonSchema\Validator;
-use Doctrine\ORM\EntityManagerInterface;
-use Symfony\Component\HttpFoundation\Request;
-use Symfony\Component\HttpFoundation\JsonResponse;
-use Symfony\Component\Routing\Annotation\Route;
+use App\Service\Resource\ResourceEditService;
+use App\Service\Resource\ResourceExportService;
+use App\Service\Resource\ResourceReadService;
+use App\Service\Resource\ResourceRelationService;
+use App\Service\Resource\ResourceTemplateService;
+use App\Service\Dac\DatasetRequestService;
+use MeekroDB;
 use Symfony\Bundle\FrameworkBundle\Controller\AbstractController;
+use Symfony\Component\HttpFoundation\JsonResponse;
+use Symfony\Component\HttpFoundation\Request;
 use Symfony\Component\Serializer\SerializerInterface;
-use OpenApi\Attributes as OA;
 
-#[Route('/api')]
-class ResourceController extends AbstractController
+abstract class ResourceController extends AbstractController
 {
-    #[Route('/resources', name: 'get_resources', methods: ['GET'])]
-    #[OA\Get(
-        path: '/api/resources',
-        summary: 'Get all resources',
-        tags: ['Resources'],
-        responses: [
-            new OA\Response(
-                response: 200,
-                description: 'Successful response',
-                content: new OA\JsonContent(
-                    type: 'array',
-                    items: new OA\Items(type: 'object')
-                )
-            )
-        ]
-    )]
-    public function getResources(
-        ResourceRepository $resourceRepository,
-        SerializerInterface $serializer
-    ): JsonResponse {
-        $resources = $resourceRepository->findAll();
-        $content = $serializer->serialize($resources, 'json');
-        return new JsonResponse($content, json: true);
+    protected ResourceReadService $resourceRead;
+    protected ResourceEditService $resourceEdit;
+    protected ResourceExportService $resourceExport;
+    protected ResourceTemplateService $resourceTemplate;
+    protected ResourceRelationService $resourceRelation;
+    protected SerializerInterface $serializer;
+    protected MeekroDB $db;
+    protected DacRequestService $dac;
+    protected DatasetRequestService $datasetRequest;
+
+    public function __construct(
+        ResourceReadService $resourceRead,
+        ResourceEditService $resourceEdit,
+        ResourceExportService $resourceExport,
+        ResourceTemplateService $resourceTemplate,
+        ResourceRelationService $resourceRelation,
+        SerializerInterface $serializer,
+        MeekroDB $db,
+        DacRequestService $dac,
+        DatasetRequestService $datasetRequest
+    ) {
+        $this->resourceRead = $resourceRead;
+        $this->resourceEdit = $resourceEdit;
+        $this->resourceExport = $resourceExport;
+        $this->resourceTemplate = $resourceTemplate;
+        $this->resourceRelation = $resourceRelation;
+        $this->serializer = $serializer;
+        $this->db = $db;
+        $this->dac = $dac;
+        $this->datasetRequest = $datasetRequest;
     }
 
-    #[Route('/resources/{id}', name: 'get_resource', methods: ['GET'])]
-    #[OA\Get(
-        path: '/api/resources/{id}',
-        summary: 'Get a resource by ID',
-        tags: ['Resources'],
-        parameters: [
-            new OA\Parameter(
-                name: 'id',
-                in: 'path',
-                required: true,
-                schema: new OA\Schema(type: 'string')
-            )
-        ],
-        responses: [
-            new OA\Response(
-                response: 200,
-                description: 'Successful response',
-                content: new OA\JsonContent(type: 'object')
-            ),
-            new OA\Response(
-                response: 404,
-                description: 'Resource not found'
-            )
-        ]
-    )]
-    public function getResource(
-        ResourceRepository $resourceRepository,
-        SerializerInterface $serializer,
-        string $id
-    ): JsonResponse {
-        $resource = $resourceRepository->find($id);
-        $content = $serializer->serialize($resource, 'json');
-        return new JsonResponse($content, json: true);
+    // Abstract method to define resource type in child controllers (e.g. 'Sample', 'Run')
+    abstract protected function getResourceType(): string;
+
+    // Abstract method for route prefix (e.g. 'samples', 'runs')
+    abstract protected function getRoutePrefix(): string;
+
+    public function listResources(Keycloak $auth, ?string $studyId = null): JsonResponse
+    {
+        $resources = $this->resourceRead->listResources($auth, $this->getResourceType(), $studyId, 'read');
+        $content = json_encode($resources);
+        return new JsonResponse($content, 200, [], true);
     }
 
-    #[Route('/resources', name: 'create_resource', methods: ['POST'])]
-    #[OA\Post(
-        path: '/api/resources',
-        summary: 'Create a new resource',
-        tags: ['Resources'],
-        requestBody: new OA\RequestBody(
-            required: true,
-            content: new OA\JsonContent(type: 'object')
-        ),
-        responses: [
-            new OA\Response(
-                response: 201,
-                description: 'Resource created successfully',
-                content: new OA\JsonContent(type: 'object')
-            ),
-            new OA\Response(
-                response: 400,
-                description: 'Invalid input'
-            )
-        ]
-    )]
-    public function createResource(
-        Request $request,
-        Keycloak $auth,
-        EntityManagerInterface $entityManager,
-        SerializerInterface $serializer,
-        ResourceTypeRepository $resourceTypeRepository,
-        StatusTypeRepository $statusTypeRepository,
-        Validator $validator
-    ): JsonResponse {
+    public function getResources(Keycloak $auth): JsonResponse
+    {
+        $resources = $this->resourceRead->listResources($auth, $this->getResourceType(), null, 'read');
+        $content = json_encode($resources);
+        return new JsonResponse($content, 200, [], true);
+    }
+
+    public function postResource(Request $request, Keycloak $auth, string $study_id): JsonResponse
+    {
         if ($auth->isGuest()) {
-            return new JsonResponse(['message' => 'Unauthorized'], status: 401);
+            return new JsonResponse(['message' => 'Unauthorized'], 401);
         }
 
-        $content = $request->getContent();
-        $data = json_decode($content);
+        $projectDir = $this->getParameter('kernel.project_dir');
+        $content = json_decode($request->getContent(), true);
+        $resourceData = $content['properties'] ?? null;
+        $resourceType = $content[strtolower($this->getResourceType()) . '_type'] ?? null;
 
-        // Ensure a resource type identifier is provided
-        if (!isset($data->resource_type_id)) {
-            return new JsonResponse(['message' => 'resource_type_id is required'], status: 400);
+        try {
+            $result = $this->resourceEdit->editResource($resourceData, $resourceType, $study_id, $auth, $projectDir);
+            if ($result['success']) {
+                $resources = $this->resourceRead->listResources($auth, $resourceType, $study_id, 'read', null, $result['resources'][0]['public_id']);
+                $resources[0]['action_type_id'] = $result['resources'][0]['action_type_id'];
+                $content = json_encode($resources[0]);
+                return new JsonResponse($content, 201, [], true);
+            } else {
+                $content = json_encode($result);
+                return new JsonResponse($content, 400, [], true);
+            }
+        } catch (\Exception $e) {
+            return new JsonResponse(['message' => $e->getMessage()], 500);
         }
-
-        // Find the resource type entity
-        $resourceType = $resourceTypeRepository->find($data->resource_type_id);
-        if (!$resourceType) {
-            return new JsonResponse(['message' => 'Invalid resource_type_id'], status: 400);
-        }
-
-        // Get the draft status type
-        $resourceStatus = $statusTypeRepository->findOneBy(['name' => 'draft']);
-        if (!$resourceStatus) {
-            return new JsonResponse(['message' => 'Status type not found'], status: 500);
-        }
-
-        // Retrieve the JSON schema from the resource type
-        $schema = $resourceType->getProperties()['data_schema'];
-
-        // Validate the data against the schema
-        $validationErrors = $validator->validate($data->properties, $schema);
-        if (!empty($validationErrors)) {
-            return new JsonResponse([
-                'message' => 'Validation failed',
-                'errors' => $validationErrors
-            ], status: 400);
-        }
-
-        // Deserialize the resource entity
-        $resource = $serializer->deserialize($content, 'App\Entity\Resource', 'json');
-        $resource->setType($resourceType);
-        $resource->setStatus($resourceStatus);
-
-        // Persist the resource entity
-        $entityManager->persist($resource);
-        $entityManager->flush();
-
-        return new JsonResponse(['message' => 'Resource created'], status: 201);
     }
 
-    #[Route('/resources/{id}', name: 'delete_resource', methods: ['DELETE'])]
-    #[OA\Delete(
-        path: '/api/resources/{id}',
-        summary: 'Delete a resource by ID',
-        tags: ['Resources'],
-        parameters: [
-            new OA\Parameter(
-                name: 'id',
-                in: 'path',
-                required: true,
-                schema: new OA\Schema(type: 'string')
-            )
-        ],
-        responses: [
-            new OA\Response(
-                response: 204,
-                description: 'Resource deleted successfully'
-            ),
-            new OA\Response(
-                response: 404,
-                description: 'Resource not found'
-            )
-        ]
-    )]
-    public function deleteResource(
-        ResourceRepository $resourceRepository,
-        EntityManagerInterface $entityManager,
-        string $id
-    ): JsonResponse {
-        $resource = $resourceRepository->find($id);
-        if (!$resource) {
-            return new JsonResponse(['message' => 'Resource not found'], 404);
+    public function putResource(Request $request, Keycloak $auth, string $study_id, string $resource_id): JsonResponse
+    {
+        if ($auth->isGuest()) {
+            return new JsonResponse(['message' => 'Unauthorized'], 401);
         }
 
-        $entityManager->remove($resource);
-        $entityManager->flush();
+        if (!$this->resourceRelation->checkRelationship($resource_id, $study_id)) {
+            return new JsonResponse(['message' => "Error: this {$this->getResourceType()} is not part of this study"], 400);
+        }
 
-        return new JsonResponse(null, 204);
+        $projectDir = $this->getParameter('kernel.project_dir');
+        $content = json_decode($request->getContent(), true);
+        $resourceData = $content['properties'] ?? null;
+        $resourceType = $content[strtolower($this->getResourceType()) . '_type'] ?? null;
+
+        try {
+            $result = $this->resourceEdit->editResource($resourceData, $resourceType, $study_id, $auth, $projectDir);
+            if ($result['success']) {
+                $resources = $this->resourceRead->listResources($auth, $resourceType, $study_id, 'read', null, $resource_id);
+                $resources[0]['action_type_id'] = $result['resources'][0]['action_type_id'];
+                $content = json_encode($resources[0]);
+                return new JsonResponse($content, 200, [], true);
+            } else {
+                $content = json_encode($result);
+                return new JsonResponse($content, 400, [], true);
+            }
+        } catch (\Exception $e) {
+            return new JsonResponse(['message' => $e->getMessage()], 500);
+        }
+    }
+
+    public function deleteResource(Keycloak $auth, string $study_id, string $resource_id): JsonResponse
+    {
+        if (!$this->resourceRelation->checkRelationship($resource_id, $study_id)) {
+            return new JsonResponse(['message' => "Error: this {$this->getResourceType()} is not part of this study"], 400);
+        }
+
+        $deletedId = $this->resourceEdit->setResourceStatus($auth, $resource_id, 'DEL');
+        $content = json_encode($deletedId);
+        return new JsonResponse($content, 200, [], true);
+    }
+
+    public function uploadResources(Request $request, Keycloak $auth, string $study_id): JsonResponse
+    {
+        if ($auth->isGuest()) {
+            return new JsonResponse(['message' => 'Unauthorized'], 401);
+        }
+
+        $content = $request->request->all();
+        $projectDir = $this->getParameter('kernel.project_dir');
+
+        $uploadResponse = $this->resourceEdit->uploadResources($auth, $study_id, $request, $projectDir, $content);
+        return new JsonResponse($uploadResponse, 200, [], true);
     }
 }

@@ -3,52 +3,82 @@
 namespace App\Controller;
 
 use App\Service\Auth\Keycloak;
+use App\Service\User\UserKeyService;
+use App\Service\User\UserReadService;
+use App\Service\User\UserRoleReadService;
+use App\Service\User\UserRoleRequestService;
+use OpenApi\Attributes as OA;
 use Symfony\Bundle\FrameworkBundle\Controller\AbstractController;
 use Symfony\Component\HttpFoundation\JsonResponse;
 use Symfony\Component\HttpFoundation\Request;
-use Symfony\Component\Serializer\SerializerInterface;
 use Symfony\Component\Routing\Attribute\Route;
-use OpenApi\Attributes as OA;
-use Exception;
+use Symfony\Component\Validator\Constraints as Assert;
+use Symfony\Component\Validator\Validator\ValidatorInterface;
 
 #[Route('/api')]
-class UserController extends AbstractController
+final class UserController extends AbstractController
 {
+    public function __construct(
+        private readonly UserReadService $userRead,
+        private readonly UserRoleReadService $roleRead,
+        private readonly UserRoleRequestService $roleRequest,
+        private readonly UserKeyService $userKey
+    ) {
+    }
+
+    #[Route('/users', name: 'get_users', methods: ['GET'])]
     #[OA\Get(
-        path: "/api/users",
-        summary: "Get Users (access restricted to admin)",
+        path: '/api/users',
+        summary: 'Get users (admin only)',
         tags: ['Users'],
+        parameters: [
+            new OA\Parameter(
+                name: 'email',
+                in: 'query',
+                required: false,
+                schema: new OA\Schema(type: 'string')
+            )
+        ],
         responses: [
             new OA\Response(
                 response: 200,
-                description: "Successful response",
+                description: 'List of users',
                 content: new OA\JsonContent(
-                    type: "object",
-                    properties: [
-                        new OA\Property(property: "id", type: "string"),
-                        new OA\Property(property: "username", type: "string"),
-                        new OA\Property(property: "enabled", type: "boolean"),
-                        new OA\Property(property: "firstName", type: "string"),
-                        new OA\Property(property: "lastName", type: "string"),
-                        new OA\Property(property: "email", type: "string"),
-                        new OA\Property(property: "roles", type: "array")
-                    ]
+                    type: 'array',
+                    items: new OA\Items(
+                        type: 'object',
+                        properties: [
+                            new OA\Property(property: 'id', type: 'string'),
+                            new OA\Property(property: 'username', type: 'string'),
+                            new OA\Property(property: 'enabled', type: 'boolean'),
+                            new OA\Property(property: 'firstName', type: 'string'),
+                            new OA\Property(property: 'lastName', type: 'string'),
+                            new OA\Property(property: 'email', type: 'string'),
+                            new OA\Property(
+                                property: 'roles',
+                                type: 'array',
+                                items: new OA\Items(type: 'string')
+                            ),
+                        ]
+                    )
                 )
-            )
+            ),
+            new OA\Response(response: 401, description: 'Unauthorized')
         ]
     )]
-    #[Route('/users', name: 'get_users', methods: ['GET'])]
-    public function getUsers(Request $request, Keycloak $auth, SerializerInterface $serializer): JsonResponse
+    public function getUsers(Request $request, Keycloak $auth): JsonResponse
     {
         if ($auth->isGuest()) {
-            return new JsonResponse(['message' => 'Unauthorized'], status: 401);
+            return $this->json(['message' => 'Unauthorized'], 401);
         }
-        $email =  $request->query->get('email');
-        require __DIR__."/../Entity/Users.php";
-        $users = getUsers($email);
-        $content = $serializer->serialize($users, 'json');
-        return new JsonResponse($content, json: true);
+
+        $email = $request->query->get('email');
+        $users = $this->userRead->findUsers(email: $email);
+
+        return $this->json($users);
     }
+
+    #[Route('/users/request', name: 'send_user_request', methods: ['POST'])]
     #[OA\Post(
         path: '/api/users/request',
         summary: 'Request user role',
@@ -57,201 +87,204 @@ class UserController extends AbstractController
             required: true,
             content: new OA\JsonContent(
                 type: 'object',
+                required: ['role'],
                 properties: [
-                    new OA\Property(property: "role", type: "string")
+                    new OA\Property(property: 'role', type: 'string')
                 ]
             )
         ),
         responses: [
             new OA\Response(
                 response: 200,
-                description: 'Request registered successfully',
+                description: 'Role request registered',
                 content: new OA\JsonContent(type: 'object')
             ),
-            new OA\Response(
-                response: 401,
-                description: 'Unauthorized'
-            ),
-            new OA\Response(
-                response: 400,
-                description: 'Invalid input'
-            )
+            new OA\Response(response: 401, description: 'Unauthorized'),
+            new OA\Response(response: 400, description: 'Invalid input'),
+            new OA\Response(response: 422, description: 'Validation failed')
         ]
     )]
-    #[Route('/users/request', name: 'send_user_request', methods: ['POST'])]
-    public function sendUserRequest(Request $request, Keycloak $auth, SerializerInterface $serializer): JsonResponse
+    public function sendUserRequest(Request $request, Keycloak $auth, ValidatorInterface $validator): JsonResponse
     {
         if ($auth->isGuest()) {
-            return new JsonResponse(['message' => 'Unauthorized'], status: 401);
+            return $this->json(['message' => 'Unauthorized'], 401);
         }
-        $params = $request->getContent();
-        $params = json_decode($params, true);
-        require __DIR__."/../Entity/Users.php";
-        $output = sendUserRequest($auth, $params);
-        $content = $serializer->serialize($output, 'json');
-        return new JsonResponse($content, json: true);
+
+        $project_dir = $this->getParameter('kernel.project_dir');
+        $result = $this->roleRequest->registerUserRequest($auth, $request, $project_dir);
+
+        return $this->json($result);
     }
 
     #[Route('/users/{user_sub}/public-key', name: 'register_user_key', methods: ['POST'])]
-    public function registerUserKey(Request $request, Keycloak $auth, SerializerInterface $serializer, string $user_sub): JsonResponse
-    {
+    #[OA\Post(
+        path: '/api/users/{user_sub}/public-key',
+        summary: 'Register user public key',
+        tags: ['Users'],
+        parameters: [
+            new OA\Parameter(
+                name: 'user_sub',
+                in: 'path',
+                required: true,
+                schema: new OA\Schema(type: 'string')
+            )
+        ],
+        requestBody: new OA\RequestBody(
+            required: true,
+            content: new OA\JsonContent(
+                type: 'object',
+                required: ['params'],
+                properties: [
+                    new OA\Property(
+                        property: 'params',
+                        type: 'object',
+                        required: ['userKey', 'type'],
+                        properties: [
+                            new OA\Property(property: 'userKey', type: 'string'),
+                            new OA\Property(
+                                property: 'type',
+                                type: 'string',
+                                enum: ['ssh', 'c4gh']
+                            )
+                        ]
+                    )
+                ]
+            )
+        ),
+        responses: [
+            new OA\Response(response: 200, description: 'Key registered successfully'),
+            new OA\Response(response: 400, description: 'Invalid key format'),
+            new OA\Response(response: 401, description: 'Unauthorized'),
+            new OA\Response(response: 422, description: 'Validation failed')
+        ]
+    )]
+    public function registerUserKey(
+        Request $request,
+        Keycloak $auth,
+        string $user_sub,
+        ValidatorInterface $validator
+    ): JsonResponse {
         if ($auth->isGuest()) {
-            return new JsonResponse(['message' => 'Unauthorized'], status: 401);
+            return $this->json(['message' => 'Unauthorized'], 401);
         }
+
         $user = $auth->getDetails();
-        if ($user['sub'] !== $user_sub) {
-            return new JsonResponse(['message' => 'Unauthorized'], status: 401);
-        }
-        $params = json_decode($request->getContent(),true);
-        $publicKey = $params['params']['userKey'];
-        $keyType = $params['params']['type'];
-        
-        // check public key //
-        if ($keyType === 'ssh'){
-            $tmpfname = tempnam("/tmp", "checkKey");
-            $tmpfname .= ".pub";
-            $handle = fopen($tmpfname, "w");
-            fwrite($handle,$publicKey);
-            fclose($handle);
-            $cmd = 'which ssh-keygen && echo "OK" || echo "KO" ';
-            $check = exec($cmd);
-            if ($check == 'OK'){
-                $cmd = "ssh-keygen -l -f ".$tmpfname." 2>/dev/null && echo 'OK' || echo 'KO'";
-                $check = exec($cmd);
-                if ($check != "OK"){
-                    error_log($cmd);
-                    throw new Exception("Error: the provided key is not valid", 400);
-                }            
-                else{
-                    unlink($tmpfname); 
-                }
-            }            
-        }
-        else if ($keyType === 'c4gh'){
-            if (strlen($publicKey) < 10){
-                throw new Exception("Error: the provided key is too short", 401);                
-            }
+        if (!isset($user['sub']) || $user['sub'] !== $user_sub) {
+            return $this->json(['message' => 'User mismatch'], 401);
         }
 
+        $payload = json_decode($request->getContent(), true, 512, JSON_THROW_ON_ERROR);
 
-        
-        if (isset($user[$keyType.'-public-key'])){
-            foreach($user[$keyType.'-public-key'] as $pc){
-                if (strpos($publicKey,$pc) === 0){
-                    return new JsonResponse(['message' => 'Public key is already associated to the user'], status: 400);
-                }
-            }            
-            $user[$keyType.'-public-key'][] = $publicKey;
-        }
-        else {
-            $user[$keyType.'-public-key'] = array($publicKey);
-        }
-        $test = $auth->updateAttribute($keyType."-public-key",$user[$keyType.'-public-key']);
-        
-        $log = array(
-            "user_id" => $user['id'],
-            "key_type" => $keyType,
-            "key_sha" => hash('sha256',$publicKey),
-            "action_type_id" => "CRE"
-        );
-        \DB::insert("user_key_log",$log);
-        if ($user['email']){
-            $to      = $user['email'];
-            $subject = 'FEGA: new '.$keyType." public key";
-            $message = 'A new '.strtoupper($keyType)." public key has been registered in FEGA.\r\n\r\n";
-            $message .= 'Its SHA256 hash is: '.hash('sha256',$publicKey)."\r\n\r\n";
-            $headers = array(
-                'From' => 'no-reply@sib.swiss',
-                'Reply-To' => 'helpdesk@sib.swiss',
-                'X-Mailer' => 'PHP/' . phpversion()
-            );
-            mail($to, $subject, $message, $headers);
+        $violations = $validator->validate($payload, new Assert\Collection([
+            'params' => new Assert\Collection([
+                'fields' => [
+                    'userKey' => [
+                        new Assert\NotBlank(),
+                        new Assert\Type('string'),
+                        new Assert\Length(['min' => 10])
+                    ],
+                    'type' => [
+                        new Assert\NotBlank(),
+                        new Assert\Choice(['ssh', 'c4gh'])
+                    ]
+                ]
+            ])
+        ]));
+
+        if (count($violations) > 0) {
+            return $this->json([
+                'message' => 'Validation failed',
+                'errors' => (string) $violations
+            ], 422);
         }
 
-        $content = $serializer->serialize($test, 'json');
-        
-        return new JsonResponse($content, json: true);
+        $publicKey = $payload['params']['userKey'];
+        $keyType = $payload['params']['type'];
 
+        $result = $this->userKey->registerKey($user, $keyType, $publicKey);
+
+        if ($result['status'] === 200) {
+            return $this->json($result['content']);
+        }
+
+        return $this->json($result['error'], $result['status']);
     }
 
     #[Route('/users/{user_sub}/public-key/{key_type}/{public_key}', name: 'delete_user_key', methods: ['DELETE'])]
-    public function deleteUserKey(Request $request, Keycloak $auth, SerializerInterface $serializer, string $user_sub, string $key_type, string $public_key): JsonResponse
-    {
-        if ($auth->isGuest()) {
-            return new JsonResponse(['message' => 'Unauthorized'], status: 401);
-        }
+    #[OA\Delete(
+        path: '/api/users/{user_sub}/public-key/{key_type}/{public_key}',
+        summary: 'Delete user public key',
+        tags: ['Users'],
+        parameters: [
+            new OA\Parameter(
+                name: 'user_sub',
+                in: 'path',
+                required: true,
+                schema: new OA\Schema(type: 'string')
+            ),
+            new OA\Parameter(
+                name: 'key_type',
+                in: 'path',
+                required: true,
+                schema: new OA\Schema(type: 'string', enum: ['ssh', 'c4gh'])
+            ),
+            new OA\Parameter(
+                name: 'public_key',
+                in: 'path',
+                required: true,
+                schema: new OA\Schema(type: 'string')
+            )
+        ],
+        responses: [
+            new OA\Response(response: 200, description: 'Key deleted successfully'),
+            new OA\Response(response: 400, description: 'Key not found'),
+            new OA\Response(response: 401, description: 'Unauthorized')
+        ]
+    )]
+    public function deleteUserKey(
+        Keycloak $auth,
+        string $user_sub,
+        string $key_type,
+        string $public_key
+    ): JsonResponse {
         $user = $auth->getDetails();
-        if ($user['sub'] !== $user_sub) {
-            return new JsonResponse(['message' => 'Unauthorized'], status: 401);
-        }
-        $publicKey = '';
-        if (!isset($user[$key_type.'-public-key'])){
-            $user[$key_type.'-public-key'] = array();
-        }
-        foreach($user[$key_type.'-public-key'] as $pc){
-            if (strpos($public_key,$pc) !== FALSE || strpos($pc, $public_key) !== FALSE){
-                $publicKey = $pc;
-            }
-        }
-        if (!$publicKey){
-            return new JsonResponse(['message' => 'Public key is not associated to the user'], status: 400);
-        }
-        $validKeys = array();
-        foreach($user[$key_type.'-public-key'] as $k){
-            if ($k !== $publicKey){
-                $validKeys[] = $k;
-            }
-        }
-        $test = $auth->updateAttribute($key_type."-public-key",$validKeys);
-
-        $log = array(
-            "user_id" => $user['id'],
-            "key_type" => $keyType,
-            "key_sha" => hash('sha256',$publicKey),
-            "action_type_id" => "DEL"
-        );
-        \DB::insert("user_key_log",$log);
-        if ($user['email']){
-            $to      = $user['email'];
-            $subject = 'FEGA:'.$keyType." public key deleted";
-            $message = 'A '.strtoupper($keyType)." public key has been deleted.\r\n\r\n";
-            $message .= 'Its SHA256 hash is: '.hash('sha256',$publicKey)."\r\n\r\n";
-            $headers = array(
-                'From' => 'no-reply@sib.swiss',
-                'Reply-To' => 'helpdesk@sib.swiss',
-                'X-Mailer' => 'PHP/' . phpversion()
-            );
-            mail($to, $subject, $message, $headers);
+        if (!$user || $auth->isGuest()) {
+            return $this->json(['message' => 'Unauthorized'], 401);
         }
 
-        $content = $serializer->serialize($test, 'json');
-        
-        return new JsonResponse($content, json: true);
+        // URL-decode public_key for accurate matching
+        $decodedKey = urldecode($public_key);
 
+        $result = $this->userKey->deleteKey($auth, $user_sub, $decodedKey, $key_type);
+
+        if ($result['status'] === 200) {
+            return $this->json($result['content']);
+        }
+
+        return $this->json($result['error'], $result['status']);
     }
 
-
+    #[Route('/roles', name: 'get_roles', methods: ['GET'])]
     #[OA\Get(
         path: '/api/roles',
-        summary: 'Get all user roles',
+        summary: 'Get all available roles',
         tags: ['Users'],
         responses: [
             new OA\Response(
                 response: 200,
-                description: 'Successful response',
+                description: 'List of roles',
                 content: new OA\JsonContent(type: 'array', items: new OA\Items(type: 'object'))
-            )
+            ),
+            new OA\Response(response: 401, description: 'Unauthorized')
         ]
     )]
-    #[Route('/roles', name: 'get_roles', methods: ['GET'])]
-    public function getRoles(Request $request, Keycloak $auth, SerializerInterface $serializer): JsonResponse
+    public function getRoles(Keycloak $auth): JsonResponse
     {
         if ($auth->isGuest()) {
-            return new JsonResponse(['message' => 'Unauthorized'], status: 401);
+            return $this->json(['message' => 'Unauthorized'], 401);
         }
-        require __DIR__."/../Entity/Users.php";
-        $roles = getRoles();
-        $content = $serializer->serialize($roles, 'json');
-        return new JsonResponse($content, json: true);
+
+        $roles = $this->roleRead->listAll();
+        return $this->json($roles);
     }
 }

@@ -1,0 +1,10 @@
+framework:
+    validation:
+        # Enables validator auto-mapping support.
+        #auto_mapping:
+        #    App\Entity\: []
+
+when@test:
+    framework:
+        validation:
+            not_compromised_password: false

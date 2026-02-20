@@ -4,26 +4,49 @@
 # Put parameters here that don't need to change on each machine where the app is deployed
 # https://symfony.com/doc/current/best_practices.html#use-parameters-for-application-configuration
 parameters:
-
+  fega_cli_path: '%env(default:fega_cli_path_default:FEGA_CLI_PATH)%'
+  fega_cli_path_default: '%kernel.project_dir%/bin'
+  fega_schema_dir: '%env(default:fega_schema_dir_default:FEGA_SCHEMA_DIR)%'
+  fega_schema_dir_default: '%kernel.project_dir%/data/schemas'
+  app.db.host: '%env(string:POSTGRES_HOST)%'
+  app.db.user: '%env(string:POSTGRES_USER)%'
+  app.db.pass: '%env(string:POSTGRES_PASSWORD)%'
+  app.db.name: '%env(string:POSTGRES_DB)%'
+  app.db.charset: 'utf8mb4'
+  keycloak.url: '%env(KEYCLOAK_URL)%'
+  keycloak.realm: '%env(KEYCLOAK_REALM)%'
+  keycloak.client_id: '%env(KEYCLOAK_CLIENT_ID)%'
+  keycloak.client_secret: '%env(KEYCLOAK_SECRET)%'
 services:
-    # default configuration for services in *this* file
-    _defaults:
-        autowire: true      # Automatically injects dependencies in your services.
-        autoconfigure: true # Automatically registers your services as commands, event subscribers, etc.
+  # default configuration for services in *this* file
+  _defaults:
+    autowire: true # Automatically injects dependencies in your services.
+    autoconfigure: true # Automatically registers your services as commands, event subscribers, etc.
 
-    # makes classes in src/ available to be used as services
-    # this creates a service per class whose id is the fully-qualified class name
-    App\:
-        resource: '../src/'
-        exclude:
-            - '../src/DependencyInjection/'
-            - '../src/Entity/'
-            - '../src/Kernel.php'
-
-    # add more service definitions when explicit configuration is needed
-    # please note that last definitions always *replace* previous ones
-    # App\Service\Auth\Keycloak:
-    #     arguments:
-    #         $publicKey: '%env(JWT_PUBLIC_KEY)%'
-    #         $algorithm: '%env(JWT_ALGORITHM)%'
-    #         $leeway: '%env(JWT_LEEWAY)%'
+  # makes classes in src/ available to be used as services
+  # this creates a service per class whose id is the fully-qualified class name
+  App\:
+    resource: '../src/'
+    exclude:
+      - '../src/DependencyInjection/'
+      - '../src/Kernel.php'
+  App\Service\Auth\KeycloakService:
+    arguments:
+      $url: '%keycloak.url%'
+      $realm: '%keycloak.realm%'
+      $clientId: '%keycloak.client_id%'
+      $clientSecret: '%keycloak.client_secret%'
+  App\Service\Validation\CliValidator:
+    arguments:
+      $cliPath: '%fega_cli_path%'
+      $projectDir: '%kernel.project_dir%'
+      $schemaDir: '%fega_schema_dir%'
+  MeekroDB:
+    class: MeekroDB
+    factory: ['App\Service\Db\MeekroFactory', 'init']
+    arguments:
+      - '%app.db.host%'
+      - '%app.db.user%'
+      - '%app.db.pass%'
+      - '%app.db.name%'
+      - '%app.db.charset%'

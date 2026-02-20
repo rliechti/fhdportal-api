@@ -7,33 +7,31 @@
         "php": ">=8.2",
         "ext-ctype": "*",
         "ext-iconv": "*",
-        "doctrine/dbal": "^3",
-        "doctrine/doctrine-bundle": "^2.12",
-        "doctrine/doctrine-migrations-bundle": "^3.3",
-        "doctrine/orm": "^3.2",
-        "dunglas/doctrine-json-odm": "^1.4",
         "justinrainbow/json-schema": "^6.0",
         "mk-j/php_xlsxwriter": "^0.39.0",
         "nelmio/api-doc-bundle": "^4.33",
         "nelmio/cors-bundle": "^2.5",
         "php-amqplib/php-amqplib": "^3.7",
-        "phpoffice/phpspreadsheet": "^4.0",
-        "ramsey/uuid-doctrine": "^2.1",
+        "phpoffice/phpspreadsheet": "^5.2",
+        "ramsey/uuid": "^4.9",
         "rbdwllr/reallysimplejwt": "^5.0",
-        "sergeytsalkov/meekrodb": "^3.1",
-        "symfony/asset": "7.1.*",
-        "symfony/console": "7.1.*",
-        "symfony/dotenv": "7.1.*",
-        "symfony/expression-language": "7.1.*",
+        "sergeytsalkov/meekrodb": "^3.1.0",
+        "symfony/asset": "7.4.*",
+        "symfony/console": "7.4.*",
+        "symfony/dotenv": "7.4.*",
+        "symfony/expression-language": "7.4.*",
         "symfony/flex": "^2",
-        "symfony/framework-bundle": "7.1.*",
-        "symfony/http-client": "7.1.*",
-        "symfony/mime": "7.1.*",
-        "symfony/process": "7.1.*",
-        "symfony/runtime": "7.1.*",
-        "symfony/serializer": "7.1.*",
-        "symfony/twig-bundle": "7.1.*",
-        "symfony/yaml": "7.1.*",
+        "symfony/framework-bundle": "7.4.*",
+        "symfony/http-client": "7.4.*",
+        "symfony/mailer": "7.4.*",
+        "symfony/mime": "7.4.*",
+        "symfony/monolog-bundle": "^3.10",
+        "symfony/process": "7.4.*",
+        "symfony/runtime": "7.4.*",
+        "symfony/serializer": "7.4.*",
+        "symfony/twig-bundle": "7.4.*",
+        "symfony/validator": "7.4.*",
+        "symfony/yaml": "7.4.*",
         "vlucas/phpdotenv": "*"
     },
     "config": {
@@ -42,7 +40,10 @@
             "symfony/flex": true,
             "symfony/runtime": true
         },
-        "sort-packages": true
+        "sort-packages": true,
+        "audit": {
+          "block-insecure": true
+        }
     },
     "autoload": {
         "psr-4": {
@@ -81,11 +82,12 @@
     },
     "extra": {
         "symfony": {
-            "allow-contrib": false,
-            "require": "7.1.*"
+            "allow-contrib": true,
+            "require": "7.4.*"
         }
     },
     "require-dev": {
+        "phpunit/phpunit": "*",
         "rector/rector": "^2.0"
     }
 }

@@ -1,0 +1,353 @@
+/* CSS Variables for Light and Dark Mode */
+:root {
+  --bg-primary: #ffffff;
+  --bg-secondary: #f8f9fa;
+  --bg-card: #ffffff;
+  --text-primary: #212529;
+  --text-secondary: #6c757d;
+  --border-color: #dee2e6;
+  --shadow: rgba(0, 0, 0, 0.1);
+  --btn-primary-bg: #007bff;
+  --btn-primary-hover: #0056b3;
+  --btn-secondary-bg: #6c757d;
+  --btn-secondary-hover: #5a6268;
+  --success-color: #28a745;
+  --error-color: #dc3545;
+  --code-bg: #f4f4f4;
+  --code-text: #333333;
+  --input-bg: #ffffff;
+  --input-border: #ced4da;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg-primary: #1a1a1a;
+    --bg-secondary: #2d2d2d;
+    --bg-card: #252525;
+    --text-primary: #e4e4e4;
+    --text-secondary: #a8a8a8;
+    --border-color: #404040;
+    --shadow: rgba(0, 0, 0, 0.3);
+    --btn-primary-bg: #0d6efd;
+    --btn-primary-hover: #0a58ca;
+    --btn-secondary-bg: #6c757d;
+    --btn-secondary-hover: #5a6268;
+    --success-color: #198754;
+    --error-color: #dc3545;
+    --code-bg: #2d2d2d;
+    --code-text: #f8f8f2;
+    --input-bg: #2d2d2d;
+    --input-border: #404040;
+  }
+}
+
+/* Reset and Base Styles */
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+  background-color: var(--bg-primary);
+  color: var(--text-primary);
+  line-height: 1.6;
+  transition: background-color 0.3s ease, color 0.3s ease;
+}
+
+/* Container */
+.container {
+  max-width: 1200px;
+  margin: 0 auto;
+  padding: 20px;
+}
+
+/* Header */
+header {
+  text-align: center;
+  margin-bottom: 40px;
+  padding: 30px 0;
+}
+
+header h1 {
+  font-size: 2.5rem;
+  font-weight: 700;
+  color: var(--text-primary);
+}
+
+@media (max-width: 768px) {
+  header h1 {
+    font-size: 2rem;
+  }
+}
+
+/* Card Section */
+.card {
+  background-color: var(--bg-card);
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  padding: 30px;
+  margin-bottom: 30px;
+  box-shadow: 0 2px 8px var(--shadow);
+  transition: background-color 0.3s ease, border-color 0.3s ease;
+}
+
+.card h2 {
+  font-size: 1.75rem;
+  margin-bottom: 20px;
+  color: var(--text-primary);
+  border-bottom: 2px solid var(--border-color);
+  padding-bottom: 10px;
+}
+
+@media (max-width: 768px) {
+  .card {
+    padding: 20px;
+  }
+
+  .card h2 {
+    font-size: 1.5rem;
+  }
+}
+
+/* Form Elements */
+.form-group {
+  margin-bottom: 20px;
+}
+
+.form-group label {
+  display: block;
+  margin-bottom: 8px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+textarea,
+select,
+input[type='file'] {
+  width: 100%;
+  padding: 12px;
+  border: 1px solid var(--input-border);
+  border-radius: 4px;
+  font-family: 'Monaco', 'Menlo', 'Courier New', monospace;
+  font-size: 14px;
+  background-color: var(--input-bg);
+  color: var(--text-primary);
+  transition: border-color 0.3s ease, background-color 0.3s ease;
+  resize: vertical;
+}
+
+textarea:focus,
+select:focus,
+input[type='file']:focus {
+  outline: none;
+  border-color: var(--btn-primary-bg);
+}
+
+textarea {
+  min-height: 100px;
+}
+
+select {
+  cursor: pointer;
+}
+
+input[type='file'] {
+  padding: 10px;
+  cursor: pointer;
+}
+
+/* Buttons */
+.button-group {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-bottom: 20px;
+}
+
+.btn {
+  padding: 12px 24px;
+  border: none;
+  border-radius: 4px;
+  font-size: 16px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background-color 0.3s ease, transform 0.1s ease;
+}
+
+.btn:hover {
+  transform: translateY(-1px);
+}
+
+.btn:active {
+  transform: translateY(0);
+}
+
+.btn-primary {
+  background-color: var(--btn-primary-bg);
+  color: white;
+}
+
+.btn-primary:hover {
+  background-color: var(--btn-primary-hover);
+}
+
+.btn-secondary {
+  background-color: var(--btn-secondary-bg);
+  color: white;
+}
+
+.btn-secondary:hover {
+  background-color: var(--btn-secondary-hover);
+}
+
+@media (max-width: 768px) {
+  .btn {
+    width: 100%;
+  }
+}
+
+/* Result Container */
+.result-container {
+  margin-top: 20px;
+  padding: 20px;
+  border-radius: 4px;
+  background-color: var(--bg-secondary);
+  border: 1px solid var(--border-color);
+  transition: background-color 0.3s ease;
+}
+
+.result-container:empty {
+  display: none;
+}
+
+.result-container h3 {
+  margin-top: 0;
+  margin-bottom: 15px;
+  color: var(--text-primary);
+}
+
+.result-container p {
+  margin: 10px 0;
+}
+
+.result-container pre {
+  background-color: var(--code-bg);
+  color: var(--code-text);
+  padding: 15px;
+  border-radius: 4px;
+  overflow-x: auto;
+  font-family: 'Monaco', 'Menlo', 'Courier New', monospace;
+  font-size: 13px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+/* Status Messages */
+.success {
+  color: var(--success-color);
+  font-weight: 600;
+}
+
+.error {
+  color: var(--error-color);
+  font-weight: 600;
+}
+
+/* Error and Warning Lists */
+.error-list,
+.warning-list {
+  margin-left: 20px;
+  padding-left: 20px;
+  margin-top: 10px;
+  margin-bottom: 15px;
+}
+
+.error-list li,
+.warning-list li {
+  margin-bottom: 8px;
+  padding-left: 5px;
+  line-height: 1.5;
+}
+
+.status-badge {
+  display: inline-block;
+  padding: 4px 12px;
+  border-radius: 4px;
+  font-size: 14px;
+  font-weight: 600;
+  margin-left: 10px;
+}
+
+.status-badge.valid {
+  background-color: var(--success-color);
+  color: white;
+}
+
+.status-badge.invalid {
+  background-color: var(--error-color);
+  color: white;
+}
+
+/* Footer */
+footer {
+  text-align: center;
+  padding: 30px 0;
+  margin-top: 40px;
+  border-top: 1px solid var(--border-color);
+  color: var(--text-secondary);
+}
+
+/* Loading State */
+.loading {
+  opacity: 0.6;
+  pointer-events: none;
+}
+
+.spinner {
+  display: inline-block;
+  width: 16px;
+  height: 16px;
+  border: 2px solid var(--border-color);
+  border-top-color: var(--btn-primary-bg);
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* Utility Classes */
+.hidden {
+  display: none;
+}
+
+.text-muted {
+  color: var(--text-secondary);
+}
+
+/* Responsive Design */
+@media (max-width: 480px) {
+  .container {
+    padding: 10px;
+  }
+
+  header {
+    padding: 20px 0;
+    margin-bottom: 20px;
+  }
+
+  .card {
+    padding: 15px;
+    margin-bottom: 20px;
+  }
+
+  .form-group {
+    margin-bottom: 15px;
+  }
+}

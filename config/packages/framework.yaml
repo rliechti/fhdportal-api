@@ -2,8 +2,8 @@
 framework:
     http_client:
        default_options:
-            verify_peer: false
-            verify_host: false
+            verify_peer: true
+            verify_host: true
     secret: '%env(APP_SECRET)%'
     #csrf_protection: true
 

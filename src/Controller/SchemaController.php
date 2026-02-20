@@ -2,16 +2,23 @@
 
 namespace App\Controller;
 
-use App\Service\Auth\Keycloak;
 use Symfony\Bundle\FrameworkBundle\Controller\AbstractController;
 use Symfony\Component\HttpFoundation\JsonResponse;
 use Symfony\Component\HttpFoundation\Request;
 use Symfony\Component\Routing\Attribute\Route;
 use OpenApi\Attributes as OA;
+use MeekroDB;
 
 #[Route('/api')]
 class SchemaController extends AbstractController
 {
+    protected MeekroDB $db;
+
+    public function __construct(MeekroDB $db)
+    {
+        $this->db = $db;
+    }
+
     #[Route('/schemas', name: 'get_schemas', methods: ['GET'])]
     #[OA\Get(
         path: '/api/schemas',
@@ -21,17 +28,23 @@ class SchemaController extends AbstractController
             new OA\Response(
                 response: 200,
                 description: 'Successful response',
-                content: new OA\JsonContent(type: "array", items: new OA\Items(type: "object"))
+                content: new OA\JsonContent(
+                    type: 'object'
+                )
             )
         ]
     )]
-    public function getSchemas(Request $request, Keycloak $auth): JsonResponse
+    public function getSchemas(): JsonResponse
     {
-        $dbSchemas = \DB::query("SELECT * from resource_type where properties is not null and properties->'data_schema'->>'x-resource' is not null");
-        $schemas = array();
+        $dbSchemas = $this->db->query(
+            "SELECT * FROM resource_type WHERE properties IS NOT NULL AND properties->'data_schema'->>'x-resource' IS NOT NULL"
+        );
+        
+        $schemas = [];
         foreach ($dbSchemas as $d) {
-            $schemas[$d['name']] = json_decode($d['properties']);
+            $schemas[$d['name']] = json_decode($d['properties'], true);
         }
+        
         return new JsonResponse($schemas);
     }
 }

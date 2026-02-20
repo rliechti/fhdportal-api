@@ -3,60 +3,51 @@
 namespace App\Controller;
 
 use App\Service\Auth\Keycloak;
-use Symfony\Bundle\FrameworkBundle\Controller\AbstractController;
-use Symfony\Component\HttpFoundation\JsonResponse;
-use Symfony\Component\Routing\Attribute\Route;
-use Symfony\Component\HttpFoundation\Request;
-use Symfony\Component\Serializer\SerializerInterface;
+use App\Service\Auth\KeycloakService;
+use App\Service\Dac\PolicyService;
+use App\Service\File\FileReadService;
 use App\Service\JsonSchema\Validator;
-use Symfony\Component\HttpFoundation\BinaryFileResponse;
-use Ramsey\Uuid\Uuid;
-use OpenApi\Attributes as OA;
+use App\Service\PublicationService;
 use App\Service\RabbitMq\RabbitMq;
+use App\Service\Resource\ResourceEditService;
+use App\Service\Resource\ResourceExportService;
+use App\Service\Resource\ResourceReadService;
+use App\Service\Resource\ResourceTemplateService;
+use App\Service\SubmissionService;
+use App\Service\Utility\GeneralHelperService;
 use Exception;
+use MeekroDB;
+use OpenApi\Attributes as OA;
+use Symfony\Bundle\FrameworkBundle\Controller\AbstractController;
+use Symfony\Component\HttpFoundation\BinaryFileResponse;
+use Symfony\Component\HttpFoundation\JsonResponse;
+use Symfony\Component\HttpFoundation\Request;
+use Symfony\Component\HttpKernel\Exception\NotFoundHttpException;
+use Symfony\Component\Routing\Attribute\Route;
+use Symfony\Component\Serializer\SerializerInterface;
 use ZipArchive;
-
-function getPubmeds($pmids)
-{
-    if (is_array($pmids)) {
-        $pmids = implode(",", $pmids);
-    }
-    $pubmeds = array();
-    $string = file_get_contents("https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi?db=pubmed&id=" . $pmids . "&retmode=xml");
-    if ($string) {
-        $xml = simplexml_load_string($string);
-        foreach ($xml->PubmedArticle as $pubmedArticle) {
-            $title = (string) $pubmedArticle->MedlineCitation->Article->ArticleTitle;
-            $pmid = (string) $pubmedArticle->MedlineCitation->PMID;
-            $doi = '';
-            $date_year = (string) $pubmedArticle->MedlineCitation->Article->Journal->JournalIssue->PubDate->Year;
-            $date_month = (string) $pubmedArticle->MedlineCitation->Article->Journal->JournalIssue->PubDate->Month;
-            $date_day = (string) $pubmedArticle->MedlineCitation->Article->Journal->JournalIssue->PubDate->Day;
-            $date = date('Y-m-d', strtotime($date_year . "-" . $date_month . "-" . $date_day));
-            $journal = (string) $pubmedArticle->MedlineCitation->Article->Journal->Title;
-            foreach ($pubmedArticle->MedlineCitation->Article->ELocationID as $locid) {
-                if ((string)$locid['EIdType'] === 'doi') {
-                    $doi = (string) $locid;
-                }
-            }
-            if ($title !== '' && $title !== '0') {
-                $pubmeds[$pmid] = array(
-                    "id" => $pmid,
-                    "doi" => $doi,
-                    "title" => $title,
-                    "journal" => $journal,
-                    "date" => $date
-                );
-            }
-        }
-    }
-    return $pubmeds;
-}
 
 #[Route('/api')]
 class SubmissionController extends AbstractController
 {
+    public function __construct(
+        private ResourceReadService $resourceRead,
+        private ResourceEditService $resourceEdit,
+        private ResourceExportService $resourceExport,
+        private ResourceTemplateService $resourceTemplate,
+        private PublicationService $publication,
+        private SerializerInterface $serializer,
+        private FileReadService $fileRead,
+        private GeneralHelperService $helper,
+        private MeekroDB $db,
+        private RabbitMq $rabbitMq,
+        private PolicyService $policy,
+        private KeycloakService $keycloak,
+        private SubmissionService $submissionService
+    ) {
+    }
 
+    #[Route('/submissions', name: 'get_submissions', methods: ['GET'])]
     #[OA\Get(
         path: '/api/submissions',
         summary: 'Get all submissions',
@@ -72,36 +63,31 @@ class SubmissionController extends AbstractController
         responses: [
             new OA\Response(
                 response: 200,
-                description: 'Successful response',
+                description: 'List of submissions',
                 content: new OA\JsonContent(type: 'array', items: new OA\Items(type: 'object'))
             )
         ]
     )]
-    #[Route('/submissions', name: 'get_submissions', methods: ['GET'])]
-    public function getSubmissions(Request $request, Keycloak $auth, SerializerInterface $serializer): JsonResponse
+    public function getSubmissions(Request $request, Keycloak $auth, ResourceReadService $readResource): JsonResponse
     {
-        require __DIR__ . "/../Entity/Resource.php";
-        $status =  $request->query->get('status');
-        if (!$status) {
-            $status = 'draft,submitted';
+        $status = $request->query->get('status') ?? 'draft,submitted';
+        $submissions = $readResource->listResources($auth, 'Study', null, 'review', $status);
+
+        if ($status === 'published') {
+            $submissions = array_map(fn($s) => [
+                'id'           => $s['id'],
+                'public_id'    => $s['public_id'],
+                'title'        => $s['title'],
+                'study_type'   => $s['properties']['study_type'] ?? null,
+                'released_date'=> $s['released_date'],
+                'nb_datasets'  => (int)($s['nb_public_datasets'] ?? 0)
+            ], $submissions);
         }
-        $submissions = listResources($auth, 'Study', null, 'review', $status);
-        if ($status === 'published'){
-            $submissions = array_map(function($s){
-                return array(
-                    "id" => $s['id'],
-                    "public_id" => $s['public_id'],
-                    "title" =>  $s['title'],
-                    "study_type" => $s['properties']->study_type,
-                    "released_date" => $s['released_date'],
-                    "nb_datasets" =>  +$s['nb_public_datasets']
-                );
-            },(array) $submissions);
-        }
-        $content = $serializer->serialize($submissions, 'json');
-        return new JsonResponse($content, json: true);
+
+        return new JsonResponse($submissions);
     }
 
+    #[Route('/{resource_type}/template', name: 'download_template', methods: ['GET'])]
     #[OA\Get(
         path: '/api/{resource_type}/template',
         summary: 'Download resource template',
@@ -118,49 +104,59 @@ class SubmissionController extends AbstractController
             new OA\Response(
                 response: 200,
                 description: 'Template downloaded successfully',
-                content: new OA\JsonContent(type: 'string', format: 'binary')
-            )
+                content: new OA\MediaType(
+                    mediaType: 'application/zip',
+                    schema: new OA\Schema(type: 'string', format: 'binary')
+                )
+            ),
+            new OA\Response(response: 404, description: 'Template not found')
         ]
     )]
-    #[Route('/{resource_type}/template', name: 'download_template', methods: ['GET'])]
-    public function downloadResourceTemplate(Request $request, Keycloak $auth, SerializerInterface $serializer, string $resource_type): BinaryFileResponse
-    {
-        require __DIR__ . "/../Entity/Resource.php";
+    public function downloadResourceTemplate(
+        Request $request,
+        Keycloak $auth,
+        ResourceTemplateService $template,
+        MeekroDB $db,
+        string $resource_type
+    ): BinaryFileResponse {
         $project_dir = $this->getParameter('kernel.project_dir');
-        if (strtolower($resource_type) == "submission"){
-            $resource_types = \DB::queryFirstColumn("SELECT name from resource_type where resource_type.properties->'data_schema'->'properties'->'extra_attributes' is not null");
-            $files = array();
-            foreach($resource_types as $resource_type){
-                $files[$resource_type] = downloadTemplate($auth, $resource_type, $project_dir,"csv");
-            }
+
+        if (strtolower($resource_type) === 'submission') {
+            $resource_types = $db->queryFirstColumn(
+                "SELECT name FROM resource_type 
+                 WHERE resource_type.properties->'data_schema'->'properties'->'extra_attributes' IS NOT NULL"
+            );
+
             $zip = new ZipArchive();
-            $filepath = tempnam(sys_get_temp_dir(), 'zip');
+            $filepath = tempnam(sys_get_temp_dir(), 'submission-templates-');
 
             if ($zip->open($filepath, ZipArchive::CREATE) !== true) {
-                throw new \RuntimeException('Cannot open ' . $filepath);
+                throw new \RuntimeException('Cannot create ZIP archive');
             }
 
-            // Add multiple files
-            foreach ($files as $filename => $file) {
-                if (file_exists($file)) {
-                    $zip->addFile($file, $filename.".csv");
-                } else {
-                    throw new NotFoundHttpException('File not found: ' . $file);
+            foreach ($resource_types as $res_type) {
+                $csvFile = $template->download($auth, $res_type, $project_dir, 'csv');
+                if (file_exists($csvFile)) {
+                    $zip->addFile($csvFile, $res_type . '.csv');
                 }
             }
+
             $zip->close();
+
             $response = new BinaryFileResponse($filepath);
             $response->headers->set('Content-Type', 'application/zip');
+            $response->headers->set('Content-Disposition', 'attachment; filename="submission-templates.zip"');
             return $response;
-
         }
-        $filepath = downloadTemplate($auth, $resource_type, $project_dir,"xlsx");    
+
+        $filepath = $template->download($auth, $resource_type, $project_dir, 'xlsx');
         return new BinaryFileResponse($filepath);
     }
 
+    #[Route('/cli/{binary}', name: 'download_cli', methods: ['GET'])]
     #[OA\Get(
         path: '/api/cli/{binary}',
-        summary: 'Download cli package',
+        summary: 'Download CLI package',
         tags: ['CLI'],
         parameters: [
             new OA\Parameter(
@@ -174,22 +170,28 @@ class SubmissionController extends AbstractController
             new OA\Response(
                 response: 200,
                 description: 'CLI downloaded successfully',
-                content: new OA\JsonContent(type: 'string', format: 'binary')
+                content: new OA\MediaType(
+                    mediaType: 'application/zip',
+                    schema: new OA\Schema(type: 'string', format: 'binary')
+                )
             )
         ]
     )]
-    #[Route('/cli/{binary}', name: 'download_cli', methods: ['GET'])]
-    public function downloadCli(Request $request, string $binary): BinaryFileResponse
+    public function downloadCli(string $binary): BinaryFileResponse
     {
-        $filepath = dirname(dirname(__DIR__))."/tools/fega-cli/".$binary;    
-        if (!file_exists($filepath)){
-            return new JsonResponse(['message' => 'File not found'], 404);
+        $filepath = dirname(dirname(__DIR__)) . '/tools/fega-cli/' . $binary;
+
+        if (!file_exists($filepath)) {
+            throw new NotFoundHttpException('CLI binary not found: ' . $binary);
         }
+
         $response = new BinaryFileResponse($filepath);
         $response->headers->set('Content-Type', 'application/zip');
+        $response->headers->set('Content-Disposition', 'attachment; filename="' . $binary . '"');
         return $response;
     }
 
+    #[Route('/submissions/{study_id}/download', name: 'download_submissions', methods: ['GET'])]
     #[OA\Get(
         path: '/api/submissions/{study_id}/download',
         summary: 'Download submission by ID',
@@ -205,24 +207,23 @@ class SubmissionController extends AbstractController
         responses: [
             new OA\Response(
                 response: 200,
-                description: 'Submission downloaded successfully',
-                content: new OA\JsonContent(type: 'string', format: 'binary')
+                description: 'Submission package downloaded',
+                content: new OA\MediaType(
+                    mediaType: 'application/zip',
+                    schema: new OA\Schema(type: 'string', format: 'binary')
+                )
             ),
-            new OA\Response(
-                response: 404,
-                description: 'Submission not found'
-            )
+            new OA\Response(response: 404, description: 'Submission not found')
         ]
     )]
-    #[Route('/submissions/{study_id}/download', name: 'download_submissions', methods: ['GET'])]
-    public function downloadSubmissions(Request $request, Keycloak $auth, SerializerInterface $serializer, string $study_id): BinaryFileResponse
+    public function downloadSubmissions(Request $request, Keycloak $auth, string $study_id): BinaryFileResponse
     {
-        require __DIR__ . "/../Entity/Resource.php";
         $project_dir = $this->getParameter('kernel.project_dir');
-        $filepath = downloadSubmission($auth, $study_id, $project_dir);
+        $filepath = $this->resourceExport->downloadSubmission($auth, $study_id, $project_dir);
         return new BinaryFileResponse($filepath);
     }
 
+    #[Route('/submissions/{study_id}', name: 'get_submission', methods: ['GET'])]
     #[OA\Get(
         path: '/api/submissions/{study_id}',
         summary: 'Get submission by ID',
@@ -238,49 +239,49 @@ class SubmissionController extends AbstractController
         responses: [
             new OA\Response(
                 response: 200,
-                description: 'Successful response',
+                description: 'Submission details with categorized types',
                 content: new OA\JsonContent(type: 'object')
             ),
-            new OA\Response(
-                response: 404,
-                description: 'Submission not found'
-            )
+            new OA\Response(response: 404, description: 'Submission not found')
         ]
     )]
-    #[Route('/submissions/{study_id}', name: 'get_submission', methods: ['GET'])]
-    public function getSubmission(Keycloak $auth, SerializerInterface $serializer, string $study_id): JsonResponse
+    public function getSubmission(Keycloak $auth, ResourceReadService $readResource, string $study_id): JsonResponse
     {
-        require __DIR__ . "/../Entity/Resource.php";
-        $submission = getResource($auth, 'Study', $study_id, "read");
-        $submission['sampleTypes'] = array();
-        $submission['experimentTypes'] = array();
-        $submission['datasetTypes'] = array();
-        $submission['analysisTypes'] = array();
-        $submission['runTypes'] = array();
-        if (is_array($submission['relationTypes']) && count($submission['relationTypes'])){
+        $submission = $readResource->getResource($auth, 'Study', $study_id, 'read');
+
+        // Categorize relation types efficiently
+        $typeCategories = [
+            'sampleTypes'     => fn($label) => stripos($label, 'sample') !== false,
+            'experimentTypes' => fn($label) => stripos($label, 'experiment') !== false,
+            'datasetTypes'    => fn($label) => stripos($label, 'dataset') !== false,
+            'analysisTypes'   => fn($label) => stripos($label, 'analysis') !== false,
+            'runTypes'        => fn($label) => stripos($label, 'run') !== false,
+        ];
+
+        foreach ($typeCategories as $key => $filter) {
+            $submission[$key] = [];
+        }
+
+        if (isset($submission['relationTypes']) && is_array($submission['relationTypes'])) {
             foreach ($submission['relationTypes'] as $rel) {
-                if (stripos($rel['label'], 'sample') !== false) {
-                    $submission['sampleTypes'][] = $rel;
-                } elseif (stripos($rel['label'], 'experiment') !== false) {
-                    $submission['experimentTypes'][] = $rel;
-                } elseif (stripos($rel['label'], 'dataset') !== false) {
-                    $submission['datasetTypes'][] = $rel;
-                } elseif (stripos($rel['label'], 'run') !== false) {
-                    $submission['runTypes'][] = $rel;
-                } elseif (stripos($rel['label'], 'analysis') !== false) {
-                    $submission['analysisTypes'][] = $rel;
+                $label = $rel['label'] ?? '';
+                foreach ($typeCategories as $catKey => $catFilter) {
+                    if ($catFilter($label)) {
+                        $submission[$catKey][] = $rel;
+                        break;
+                    }
                 }
             }
-            unset($submission['relationTypes']);            
+            unset($submission['relationTypes']);
         }
-        $content = $serializer->serialize($submission, 'json');
-        return new JsonResponse($content, json: true);
-        // return new JsonResponse($submissions);
+
+        return new JsonResponse($submission);
     }
 
+    #[Route('/pubmeds/{pmid}', name: 'get_pubmeds', methods: ['GET'])]
     #[OA\Get(
         path: '/api/pubmeds/{pmid}',
-        summary: 'Get PubMed documents by PubMedID',
+        summary: 'Get PubMed documents by PMID',
         tags: ['PubMed'],
         parameters: [
             new OA\Parameter(
@@ -293,150 +294,102 @@ class SubmissionController extends AbstractController
         responses: [
             new OA\Response(
                 response: 200,
-                description: 'Successful response',
+                description: 'PubMed record(s)',
                 content: new OA\JsonContent(type: 'object')
             ),
-            new OA\Response(
-                response: 404,
-                description: 'PubMed record not found'
-            )
+            new OA\Response(response: 404, description: 'PubMed record not found')
         ]
     )]
-    #[Route('/pubmeds/{pmid}', name: 'get_pubmeds', methods: ['GET'])]
-    public function getPubmeds(
-        string $pmid
-    ): JsonResponse {
-        $pubmeds = getPubmeds($pmid);
+    public function getPubmeds(string $pmid): JsonResponse
+    {
+        $pubmeds = $this->publication->fetchPubmeds($pmid);
         return new JsonResponse($pubmeds);
     }
 
+    #[Route('/submissions/upload-study', name: 'upload_study', methods: ['POST'])]
     #[OA\Post(
         path: '/api/submissions/upload-study',
-        summary: 'Upload a new study',
+        summary: 'Upload new study from file',
         tags: ['Submissions'],
         requestBody: new OA\RequestBody(
             required: true,
             content: new OA\JsonContent(type: 'object')
         ),
         responses: [
-            new OA\Response(
-                response: 200,
-                description: 'Study uploaded successfully',
-                content: new OA\JsonContent(type: 'object')
-            ),
-            new OA\Response(
-                response: 401,
-                description: 'Unauthorized'
-            ),
-            new OA\Response(
-                response: 400,
-                description: 'Invalid input'
-            )
+            new OA\Response(response: 200, description: 'Study uploaded successfully'),
+            new OA\Response(response: 401, description: 'Unauthorized'),
+            new OA\Response(response: 400, description: 'Invalid input')
         ]
     )]
-    #[Route('/submissions/upload-study', name: 'upload_study', methods: ['POST'])]
-    public function uploadStudy(Request $request, Keycloak $auth, SerializerInterface $serializer, Validator $validator): JsonResponse
+    public function uploadStudy(Request $request, Keycloak $auth): JsonResponse
     {
         if ($auth->isGuest()) {
-            return new JsonResponse(['message' => 'Unauthorized'], status: 401);
+            return new JsonResponse(['message' => 'Unauthorized'], 401);
         }
-        require __DIR__ . "/../Entity/Resource.php";
+
         $content = $request->request->all();
         $project_dir = $this->getParameter('kernel.project_dir');
-        $uploadResponse = uploadResources($auth, 'new', $request, $project_dir, $content, $validator, $serializer);
-        return new JsonResponse($uploadResponse, json: true);
+        $uploadResponse = $this->resourceEdit->uploadResources($auth, 'new', $request, $project_dir, $content);
+        return new JsonResponse($uploadResponse,200,[],true);
     }
 
+    #[Route('/submissions', name: 'post_submission', methods: ['POST'])]
     #[OA\Post(
         path: '/api/submissions',
-        summary: 'Submit a new study',
+        summary: 'Create new study submission',
         tags: ['Submissions'],
         requestBody: new OA\RequestBody(
             required: true,
             content: new OA\JsonContent(type: 'object')
         ),
         responses: [
-            new OA\Response(
-                response: 200,
-                description: 'Study created or updated successfully',
-                content: new OA\JsonContent(type: 'object')
-            ),
-            new OA\Response(
-                response: 401,
-                description: 'Unauthorized'
-            ),
-            new OA\Response(
-                response: 400,
-                description: 'Invalid input'
-            )
+            new OA\Response(response: 200, description: 'Study created successfully'),
+            new OA\Response(response: 401, description: 'Unauthorized'),
+            new OA\Response(response: 400, description: 'Invalid input')
         ]
     )]
-    #[Route('/submissions', name: 'post_submission', methods: ['POST'])]
-    public function postSubmission(Request $request, Keycloak $auth, SerializerInterface $serializer, Validator $validator): JsonResponse
+    public function postSubmission(Request $request, Keycloak $auth): JsonResponse
     {
         if ($auth->isGuest()) {
-            return new JsonResponse(['message' => 'Unauthorized'], status: 401);
+            return new JsonResponse(['message' => 'Unauthorized'], 401);
         }
-        require __DIR__ . "/../Entity/Resource.php";
-        $content = $request->getContent();
-        $study = json_decode($content);
-        try {
 
-            $publications = array();
+        $study = json_decode($request->getContent());
+
+        try {
+            $publications = [];
             if (isset($study->pubmed_ids) && is_array($study->pubmed_ids) && count($study->pubmed_ids)) {
-                $publications = getPubmeds($study->pubmed_ids);
+                $publications = $this->publication->fetchPubmeds($study->pubmed_ids);
                 $study->pubmed_ids = array_keys($publications);
             }
-            $study_id = (isset($study->id)) ? $study->id : 'new';
+
+            $study_id = $study->id ?? 'new';
             $project_dir = $this->getParameter('kernel.project_dir');
-            $study = editResource($study, 'Study', $study_id, $auth, $validator, $project_dir);
+            $result = $this->resourceEdit->editResource($study, 'Study', $study_id, $auth, $project_dir);
 
-            // publications
-            if (count($publications) > 0) {
-                foreach ($publications as $pmid => $publication) {
-                    $json_schemas = \DB::queryFirstField("SELECT properties from resource_type where name = 'Publication'");
-                    if (!$json_schemas) {
-                        throw new Exception("Unknown schemas", 500);
-                    }
-                    $schemas = json_decode($json_schemas);
-                    if (!isset($schemas->data_schema)) {
-                        throw new Exception("Unknown data_schema", 500);
-                    }
-
-                    // Validate the data against the schema
-                    $publication['id'] = intval($publication['id']);
-                    $validationErrors = $validator->validate((object) $publication, $schemas->data_schema);
-                    if (!empty($validationErrors)) {
-                        $message = implode(". ", array_map(function ($v) {
-                            return $v['message'];
-                        }, $validationErrors));
-                        throw new Exception($message, 400);
-                    }
-                    $pub_resource = array(
-                        "id" => null,
-                        "properties" => json_encode($publication),
-                        "resource_type_id" => \DB::queryFirstField("SELECT id from resource_type where name = 'Publication'"),
-                        "status_type_id" => "PUB"
-                    );
-
-                    $pub_resource['id'] = \DB::queryFirstField("SELECT id from resource where resource.properties ->> 'id' = %s", $pmid);
-                    if (!$pub_resource['id']) {
-                        $uuid = Uuid::uuid4();
-                        $pub_resource['id'] = $uuid->toString();
-                        \DB::insert("resource", $pub_resource);
-                    }
-                }
+            if ($result['success']) {
+                $resources = $this->resourceRead->listResources(
+                    $auth,
+                    'Study',
+                    null,
+                    'read',
+                    null,
+                    $result['resources'][0]['public_id']
+                );
+                $this->publication->processPublications($publications);
+                return new JsonResponse($resources[0]);
             }
-            $content = $serializer->serialize($study, 'json');
-            return new JsonResponse($content, json: true);
-        } catch (\Exception $e) {
-            // $status = is_numeric($e->getCode()) ? $e->getCode() : 500;
-            return new JsonResponse($e->getMessage(), status: 500);
+
+            return new JsonResponse($result);
+        } catch (Exception $e) {
+            return new JsonResponse(['error' => $e->getMessage()], 500);
         }
     }
+
+    #[Route('/submissions/{study_id}', name: 'put_submission', methods: ['PUT'])]
     #[OA\Put(
         path: '/api/submissions/{study_id}',
-        summary: 'Update a study submission',
+        summary: 'Update study submission',
         tags: ['Submissions'],
         parameters: [
             new OA\Parameter(
@@ -451,222 +404,112 @@ class SubmissionController extends AbstractController
             content: new OA\JsonContent(type: 'object')
         ),
         responses: [
-            new OA\Response(
-                response: 200,
-                description: 'Submission created or updated successfully',
-                content: new OA\JsonContent(type: 'object')
-            ),
-            new OA\Response(
-                response: 401,
-                description: 'Unauthorized'
-            ),
-            new OA\Response(
-                response: 400,
-                description: 'Invalid input'
-            )
+            new OA\Response(response: 200, description: 'Study updated successfully'),
+            new OA\Response(response: 401, description: 'Unauthorized'),
+            new OA\Response(response: 400, description: 'Invalid input')
         ]
     )]
-    #[Route('/submissions/{study_id}', name: 'put_submission', methods: ['PUT'])]
-    public function putSubmission(Request $request, Keycloak $auth, SerializerInterface $serializer, Validator $validator, string $study_id): JsonResponse
+    public function putSubmission(Request $request, Keycloak $auth, string $study_id): JsonResponse
     {
         if ($auth->isGuest()) {
-            return new JsonResponse(['message' => 'Unauthorized'], status: 401);
+            return new JsonResponse(['message' => 'Unauthorized'], 401);
         }
-        require __DIR__ . "/../Entity/Resource.php";
-        $content = $request->getContent();
-        $submission = json_decode($content);
-        try {
 
-            $publications = array();
-            if (isset($submission->pubmed_ids) && is_array($submission->pubmed_ids) && count($submission->pubmed_ids)) {
-                $publications = getPubmeds($submission->pubmed_ids);
-                $submission->pubmed_ids = array_keys($publications);
+        $study = json_decode($request->getContent());
+
+        try {
+            $publications = [];
+            if (isset($study->pubmed_ids) && is_array($study->pubmed_ids) && count($study->pubmed_ids)) {
+                $publications = $this->publication->fetchPubmeds($study->pubmed_ids);
+                $study->pubmed_ids = array_keys($publications);
             }
 
             $project_dir = $this->getParameter('kernel.project_dir');
-            $submission = editResource($submission, 'Study', $study_id, $auth, $validator, $project_dir);
+            $result = $this->resourceEdit->editResource($study, 'Study', $study_id, $auth, $project_dir);
 
-            // publications
-            if (count($publications) > 0) {
-                foreach ($publications as $pmid => $publication) {
-                    $json_schemas = \DB::queryFirstField("SELECT properties from resource_type where name = 'Publication'");
-                    if (!$json_schemas) {
-                        throw new Exception("Unknown schemas", 500);
-                    }
-                    $schemas = json_decode($json_schemas);
-                    if (!isset($schemas->data_schema)) {
-                        throw new Exception("Unknown data_schema", 500);
-                    }
-
-                    // Validate the data against the schema
-                    $publication['id'] = intval($publication['id']);
-                    $validationErrors = $validator->validate((object) $publication, $schemas->data_schema);
-                    if (!empty($validationErrors)) {
-                        $message = implode(". ", array_map(function ($v) {
-                            return $v['message'];
-                        }, $validationErrors));
-                        throw new Exception($message, 400);
-                    }
-                    $pub_resource = array(
-                        "id" => null,
-                        "properties" => json_encode($publication),
-                        "resource_type_id" => \DB::queryFirstField("SELECT id from resource_type where name = 'Publication'"),
-                        "status_type_id" => "PUB"
-                    );
-
-                    $pub_resource['id'] = \DB::queryFirstField("SELECT id from resource where resource.properties ->> 'id' = %s", $pmid);
-                    if (!$pub_resource['id']) {
-                        $uuid = Uuid::uuid4();
-                        $pub_resource['id'] = $uuid->toString();
-                        \DB::insert("resource", $pub_resource);
-                    }
-                }
+            if ($result['success']) {
+                $this->publication->processPublications($publications);
+                $resources = $this->resourceRead->listResources(
+                    $auth,
+                    'Study',
+                    null,
+                    'review',
+                    null,
+                    $result['resources'][0]['public_id']
+                );
+                return new JsonResponse($resources[0]);
             }
-            $content = $serializer->serialize($submission, 'json');
-            return new JsonResponse($content, json: true);
-        } catch (\Exception $e) {
-            // $status = is_numeric($e->getCode()) ? $e->getCode() : 500;
-            return new JsonResponse($e->getMessage(), status: 500);
+
+            return new JsonResponse($result);
+        } catch (Exception $e) {
+            return new JsonResponse(['error' => $e->getMessage()], 500);
         }
     }
 
+    #[Route('/submissions/{study_id}', name: 'patch_submission', methods: ['PATCH'])]
     #[OA\Patch(
         path: '/api/submissions/{study_id}',
-        summary: 'Patch a submitted study, set status',
+        summary: 'Patch submission status',
         tags: ['Submissions'],
+        parameters: [
+            new OA\Parameter(
+                name: 'study_id',
+                in: 'path',
+                required: true,
+                schema: new OA\Schema(type: 'string')
+            )
+        ],
         requestBody: new OA\RequestBody(
             required: true,
             content: new OA\JsonContent(type: 'object')
         ),
         responses: [
-            new OA\Response(
-                response: 200,
-                description: 'Study status updated successfully',
-                content: new OA\JsonContent(type: 'object')
-            ),
-            new OA\Response(
-                response: 400,
-                description: 'Invalid input'
-            )
+            new OA\Response(response: 204, description: 'Status updated successfully'),
+            new OA\Response(response: 401, description: 'Unauthorized'),
+            new OA\Response(response: 400, description: 'Invalid input')
         ]
     )]
-    #[Route('/submissions/{study_id}', name: 'patch_submission', methods: ['PATCH'])]
-    public function patchSubmission(Request $request, Keycloak $auth, SerializerInterface $serializer, Validator $validator, string $study_id): JsonResponse
-    {
+    public function patchSubmission(
+        Request $request,
+        Keycloak $auth,
+        Validator $validator,
+        string $study_id
+    ): JsonResponse {
         if ($auth->isGuest()) {
-            return new JsonResponse(['message' => 'Unauthorized'], status: 401);
+            return $this->json(['message' => 'Unauthorized'], 401);
         }
+
         $user = $auth->getDetails();
-        require __DIR__ . "/../Entity/Resource.php";
-        $content = $request->getContent();
-        $patch = json_decode($content,true);
+        $patch = json_decode($request->getContent(), true, flags: JSON_THROW_ON_ERROR);
+        $field = $this->helper->checkUuid($study_id) ? 'study_id' : 'study_public_id';
+
         try {
-            require __DIR__ . "/../Entity/Dac.php";
-            require __DIR__."/../../tools/keycloak.php";
-            $study = patchResource($study_id, $patch, $auth);
-            $field = (checkUuid($study_id)) ? "study_id" : "study_public_id";
-            if (isset($patch['status_type_id'])){
-                if ($patch['status_type_id'] == 'SUB'){
-                    // register SDA files
-                    $sdafiles = \DB::query("SELECT sdafile_public_id, dataset_public_id, study_public_id  from sdafile_study_dataset_view where ".$field." = %s and dataset_public_id is not null",$study_id);
-                    
-                    // $_SERVER['MQ_HOST'] is  not set for the standalone demonstrator //                    
-                    if ($sdafiles && isset($_SERVER['MQ_HOST'])){
-                        $rabbitmq = new \App\Service\RabbitMq\RabbitMq;
-                        $file_submission_result = $rabbitmq->mapSDAfiles($sdafiles);
-                    }
-                    
-                    // register DAC
-                    $datasets = \DB::query("SELECT id as dataset_id, properties->>'policy_id' as policy_id, study_id from dataset_view where ".$field." = %s",$study_id);
-                    foreach($datasets as $d){
-                        if ($d['policy_id']){
-                            registerDatasetPolicy($auth,$d['dataset_id'],$d['policy_id']);   
-                            // provide review (commenter) access to dac members
-                            $policy = \getPolicy($auth,$d['policy_id'],true) ;
-                            if (isset($policy['dac']) && isset($policy['dac']['members'])){
-                                foreach($policy['dac']['members'] as $dac_member){
-                                    if ($dac_member['email']){
-                                        $users = \getKeyCloakUsers(null,"email=".$dac_member['email']);
-                                        foreach($users as $u){
-                                            $dac_member_user_id = \DB::queryFirstField("SELECT id from \"user\" where external_id = %s",$u['username']);
-                                            if (!$dac_member_user_id){
-                                                $dac_member_user = array("email" => $dac_member['email'],"external_id" => $u['username']);
-                                                \DB::insert("user",$dac_member_user);
-                                                $dac_member_user_id = \DB::insertId();
-                                            }
-                                            $access = \DB::queryFirstRow("SELECT * from resource_acl where resource_id = %s and user_id = %i", $d['study_id'], $dac_member_user_id);
-                                            if (!$access) {
-                                                \DB::insert("resource_acl", array('user_id' => $dac_member_user_id,'resource_id' => $d['study_id'],'role_id' => 'COM'));
-                                            } elseif ($access['role_id'] != 'COM' && $access['role_id'] != 'OWN') {
-                                                \DB::update("resource_acl", array('role_id' => 'COM'), 'resource_id = %s and user_id = %i', $d['study_id'], $dac_member_user_id);
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }                    
-                }
-                
-                // remove policy_id from properties and remove relationsihip
-                else if ($patch['status_type_id'] !== 'PUB' && $patch['status_type_id'] !== 'VER'){
-                    $datasets = \DB::query("SELECT id as dataset_id, properties->>'policy_id' as policy_id, study_id from dataset_view where ".$field." = %s",$study_id);
-                    foreach($datasets as $d){
-                        if ($d['policy_id']){
-                            \DB::query("UPDATE resource SET properties = jsonb_set(properties, '{policy_id}', '\"\"') WHERE id = %s",$d['dataset_id']);
-                            $properties = \DB::queryFirstField("SELECT properties from resource where id = %s",$d['dataset_id']);
-                            $uuid = Uuid::uuid4();
-                            $log_id = $uuid->toString();
-                            $log = array(
-                                "id" => $log_id,
-                                "resource_id" => $d['dataset_id'],
-                                "user_id" => $user['id'],
-                                "action_type_id" => "DEL",
-                                "properties" => $properties
-                            );
-                            \DB::insert("resource_log", $log);        
-                            $relationship_id = \DB::queryFirstField("SELECT id from relationship where domain_resource_id = %s_dataset_id and range_resource_id = %s_policy_id",$d);
-                            if ($relationship_id){
-                                \DB::update("relationship",array("is_active" => FALSE),"id = %s",$relationship_id);
-                                $uuid = Uuid::uuid4();
-                                $log_id = $uuid->toString();
-                                $log = array(
-                                    "id" => $log_id,
-                                    "relationship_id" => $relationship_id,
-                                    "user_id" => $user['id'],
-                                    "action_type_id" => "DEL"
-                                );
-                                \DB::insert("relationship_log",$log);
-                            }
-                            // remove  access to dac members
-                            $policy = \getPolicy($auth,$d['policy_id'],true) ;
-                            if (isset($policy['dac']) && isset($policy['dac']['members'])){
-                                foreach($policy['dac']['members'] as $dac_member){
-                                    if ($dac_member['email']){
-                                        $users = \getKeyCloakUsers(null,"email=".$dac_member['email']);
-                                        foreach($users as $u){
-                                            $dac_member_user_id = \DB::queryFirstField("SELECT id from \"user\" where external_id = %s",$u['username']);
-                                            if ($dac_member_user_id){
-                                                \DB::delete("resource_acl", "user_id = %i and resource_id = %s and role_id = 'COM'",$dac_member_user_id,$d['study_id']);
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                            
-                        }
-                    }                                        
-                }
+            $this->resourceEdit->patchResource($study_id, $patch, $auth);
+
+            if (!isset($patch['status_type_id'])) {
+                return $this->json(null, 204);
             }
-            return new JsonResponse("",status: 204);
-        } catch (\Exception $e) {
-            return new JsonResponse($e->getMessage(), status: 500);
+
+            $status = $patch['status_type_id'];
+            if ($status === 'SUB') {
+                $result = $this->submissionService->handleSubmission($auth, $study_id, $field, $user);
+                if (!$result['success']) {
+                    return $this->json($result['error'], $result['status']);
+                }
+            } elseif (!in_array($status, ['PUB', 'VER'])) {
+                $this->submissionService->handleUnsubmission($auth, $study_id, $field, $user);
+            }
+
+            return $this->json(null, 204);
+        } catch (\Throwable $e) {
+            return $this->json(['error' => $e->getMessage()], 500);
         }
     }
 
+    #[Route('/submissions/{study_id}', name: 'delete_submission', methods: ['DELETE'])]
     #[OA\Delete(
         path: '/api/submissions/{study_id}',
-        summary: 'Delete a submission by ID',
+        summary: 'Delete submission',
         tags: ['Submissions'],
         parameters: [
             new OA\Parameter(
@@ -677,29 +520,19 @@ class SubmissionController extends AbstractController
             )
         ],
         responses: [
-            new OA\Response(
-                response: 204,
-                description: 'Submission deleted successfully'
-            ),
-            new OA\Response(
-                response: 404,
-                description: 'Submission not found'
-            )
+            new OA\Response(response: 200, description: 'Submission deleted successfully')
         ]
     )]
-    #[Route('/submissions/{study_id}', name: 'delete_submission', methods: ['DELETE'])]
-    public function deleteSubmission(string $study_id, Keycloak $auth, SerializerInterface $serializer): JsonResponse
+    public function deleteSubmission(string $study_id, Keycloak $auth, ResourceEditService $editResource): JsonResponse
     {
-        require __DIR__ . "/../Entity/Resource.php";
-        $deleted_id = setResourceStatus($auth, $study_id, 'DEL');
-        $content = $serializer->serialize($deleted_id, 'json');
-        return new JsonResponse($content, json: true);
-        // return new JsonResponse($submissions);
+        $deleted_id = $editResource->setResourceStatus($auth, $study_id, 'DEL');
+        return new JsonResponse($deleted_id);
     }
 
+    #[Route('/submissions/{study_id}/users', name: 'post_submission_user', methods: ['POST'])]
     #[OA\Post(
         path: '/api/submissions/{study_id}/users',
-        summary: 'Add a user to a submission',
+        summary: 'Add user to submission',
         tags: ['Submissions'],
         parameters: [
             new OA\Parameter(
@@ -714,38 +547,29 @@ class SubmissionController extends AbstractController
             content: new OA\JsonContent(type: 'object')
         ),
         responses: [
-            new OA\Response(
-                response: 200,
-                description: 'User added to study successfully',
-                content: new OA\JsonContent(type: 'object')
-            ),
-            new OA\Response(
-                response: 400,
-                description: 'Invalid input'
-            )
+            new OA\Response(response: 200, description: 'User added successfully')
         ]
     )]
-    #[Route('/submissions/{study_id}/users', name: 'post_submission_user', methods: ['POST'])]
-    public function postSubmissionUser(string $study_id, Request $request, Keycloak $auth, SerializerInterface $serializer): JsonResponse
+    public function postSubmissionUser(string $study_id, Request $request, Keycloak $auth): JsonResponse
     {
         if ($auth->isGuest()) {
-            return new JsonResponse(['message' => 'Unauthorized'], status: 401);
+            return new JsonResponse(['message' => 'Unauthorized'], 401);
         }
-        require __DIR__ . "/../Entity/Resource.php";
-        $content = $request->getContent();
-        $user = json_decode($content, true);
+
+        $user = json_decode($request->getContent(), true);
+
         try {
-            $study = editResourceUser($study_id, $user, $auth);
-            $content = $serializer->serialize($study, 'json');
-            return new JsonResponse($content, json: true);
-        } catch (\Exception $e) {
-            return new JsonResponse($e->getMessage(), status: 500);
+            $study_user_view = $this->resourceEdit->editResourceUser($study_id, $user, $auth);
+            return new JsonResponse($study_user_view);
+        } catch (Exception $e) {
+            return new JsonResponse(['error' => $e->getMessage()], 500);
         }
     }
 
+    #[Route('/submissions/{study_id}/users/{user_id}', name: 'delete_submission_user', methods: ['DELETE'])]
     #[OA\Delete(
         path: '/api/submissions/{study_id}/users/{user_id}',
-        summary: 'Remove a user from a submission',
+        summary: 'Remove user from submission',
         tags: ['Submissions'],
         parameters: [
             new OA\Parameter(
@@ -762,33 +586,23 @@ class SubmissionController extends AbstractController
             )
         ],
         responses: [
-            new OA\Response(
-                response: 200,
-                description: 'User removed from study successfully',
-                content: new OA\JsonContent(type: 'object')
-            ),
-            new OA\Response(
-                response: 404,
-                description: 'Study or user not found'
-            )
+            new OA\Response(response: 200, description: 'User removed successfully')
         ]
     )]
-    #[Route('/submissions/{study_id}/users/{user_id}', name: 'delete_submission_user', methods: ['DELETE'])]
-    public function deleteSubmissionUser(string $study_id, string $user_id, SerializerInterface $serializer): JsonResponse
+    public function deleteSubmissionUser(string $study_id, string $user_id): JsonResponse
     {
-        require __DIR__ . "/../Entity/Resource.php";
         try {
-            $study = deleteResourceUser($study_id, $user_id);
-            $content = $serializer->serialize($study, 'json');
-            return new JsonResponse($content, json: true);
-        } catch (\Exception $e) {
-            return new JsonResponse($e->getMessage(), status: 500);
+            $study_user_view = $this->resourceEdit->deleteResourceUser($study_id, $user_id);
+            return new JsonResponse($study_user_view);
+        } catch (Exception $e) {
+            return new JsonResponse(['error' => $e->getMessage()], 500);
         }
     }
 
+    #[Route('/submissions/{study_id}/raw-files', name: 'get_raw_files', methods: ['GET'])]
     #[OA\Get(
         path: '/api/submissions/{study_id}/raw-files',
-        summary: 'Get raw files for a submission',
+        summary: 'Get raw files for submission',
         tags: ['Submissions'],
         parameters: [
             new OA\Parameter(
@@ -801,38 +615,30 @@ class SubmissionController extends AbstractController
         responses: [
             new OA\Response(
                 response: 200,
-                description: 'Raw files retrieved successfully',
+                description: 'Raw files list',
                 content: new OA\JsonContent(type: 'array', items: new OA\Items(type: 'object'))
             ),
-            new OA\Response(
-                response: 401,
-                description: 'Unauthorized'
-            ),
-            new OA\Response(
-                response: 500,
-                description: 'Internal server error'
-            )
+            new OA\Response(response: 401, description: 'Unauthorized')
         ]
     )]
-    #[Route('/submissions/{study_id}/raw-files', name: 'get_raw_files', methods: ['GET'])]
-    public function getRawFiles(string $study_id, Request $request, Keycloak $auth, SerializerInterface $serializer): JsonResponse
+    public function getRawFiles(string $study_id, Request $request, Keycloak $auth): JsonResponse
     {
         if ($auth->isGuest()) {
-            return new JsonResponse(['message' => 'Unauthorized'], status: 401);
+            return new JsonResponse(['message' => 'Unauthorized'], 401);
         }
-        require __DIR__ . "/../Entity/FileRepository.php";
+
         try {
-            $files = getRawFiles($study_id, $auth);
-            $content = $serializer->serialize($files, 'json');
-            return new JsonResponse($content, json: true);
+            $files = $this->fileRead->getRawFiles($study_id, $auth);
+            return new JsonResponse($files);
         } catch (Exception $e) {
-            return new JsonResponse($e->getMessage(), status: 500);
+            return new JsonResponse(['error' => $e->getMessage()], 500);
         }
     }
 
+    #[Route('/submissions/{study_id}/analysis-files', name: 'get_analysis_files', methods: ['GET'])]
     #[OA\Get(
         path: '/api/submissions/{study_id}/analysis-files',
-        summary: 'Get analysis files for a study',
+        summary: 'Get analysis files for submission',
         tags: ['Submissions'],
         parameters: [
             new OA\Parameter(
@@ -845,32 +651,23 @@ class SubmissionController extends AbstractController
         responses: [
             new OA\Response(
                 response: 200,
-                description: 'Analysis files retrieved successfully',
+                description: 'Analysis files list',
                 content: new OA\JsonContent(type: 'array', items: new OA\Items(type: 'object'))
             ),
-            new OA\Response(
-                response: 401,
-                description: 'Unauthorized'
-            ),
-            new OA\Response(
-                response: 500,
-                description: 'Internal server error'
-            )
+            new OA\Response(response: 401, description: 'Unauthorized')
         ]
     )]
-    #[Route('/submissions/{study_id}/analysis-files', name: 'get_analysis_files', methods: ['GET'])]
-    public function getAnalysisFiles(string $study_id, Request $request, Keycloak $auth, SerializerInterface $serializer): JsonResponse
+    public function getAnalysisFiles(string $study_id, Request $request, Keycloak $auth): JsonResponse
     {
         if ($auth->isGuest()) {
-            return new JsonResponse(['message' => 'Unauthorized'], status: 401);
+            return new JsonResponse(['message' => 'Unauthorized'], 401);
         }
-        require __DIR__ . "/../Entity/FileRepository.php";
+
         try {
-            $files = getAnalysisFiles($study_id, $auth);
-            $content = $serializer->serialize($files, 'json');
-            return new JsonResponse($content, json: true);
+            $files = $this->fileRead->getAnalysisFiles($study_id, $auth);
+            return new JsonResponse($files);
         } catch (Exception $e) {
-            return new JsonResponse($e->getMessage(), status: 500);
+            return new JsonResponse(['error' => $e->getMessage()], 500);
         }
     }
 }

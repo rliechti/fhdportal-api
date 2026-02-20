@@ -11,13 +11,13 @@ Make sure you have PHP, Composer and  the [symfony-cli tools](https://symfony.co
 Clone the project repository:
 
 ```sh
-git clone https://github.com/rliechti/fhdportal-api.git
+git clone https://gitlab.sib.swiss/fega/fega-api.git
 ```
 
 Navigate to the project directory:
 
 ```sh
-cd fhdportal-api
+cd fega-api
 ```
 
 Install the project dependencies:

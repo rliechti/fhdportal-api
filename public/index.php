@@ -12,21 +12,24 @@ else{
     error_log("Cannot load composer autoload");
 }
 $POSTGRES_HOST = $_SERVER['POSTGRES_HOST'] ?? '';
+$POSTGRES_PORT = $_SERVER['POSTGRES_PORT'] ?? '';
 $POSTGRES_DB = $_SERVER['POSTGRES_DB'] ?? '';
 $POSTGRES_USER = $_SERVER['POSTGRES_USER'] ?? '';
 $POSTGRES_PASSWORD = $_SERVER['POSTGRES_PASSWORD'] ?? '';
 $dotenv = new Dotenv();
-if (file_exists(__DIR__.'/.env')){
-    $dotenv->loadEnv(__DIR__.'/.env', overrideExistingVars: true);    
-    if (!$POSTGRES_HOST && isset($_ENV['POSTGRES_HOST'])) $POSTGRES_HOST = $_ENV['POSTGRES_HOST'];
-    if (!$POSTGRES_DB && isset($_ENV['POSTGRES_DB'])) $POSTGRES_DB = $_ENV['POSTGRES_DB'];
-    if (!$POSTGRES_USER && isset($_ENV['POSTGRES_USER'])) $POSTGRES_USER = $_ENV['POSTGRES_USER'];
-    if (!$POSTGRES_PASSWORD && isset($_ENV['POSTGRES_PASSWORD'])) $POSTGRES_PASSWORD = $_ENV['POSTGRES_PASSWORD'];
+if (file_exists(dirname(__DIR__).'/.env')){
+    $dotenv->loadEnv(dirname(__DIR__).'/.env', overrideExistingVars: true);    
+	if (!$POSTGRES_HOST && isset($_ENV['POSTGRES_HOST'])) $POSTGRES_HOST = $_ENV['POSTGRES_HOST'];
+	if (!$POSTGRES_PORT && isset($_ENV['POSTGRES_PORT'])) $POSTGRES_PORT = $_ENV['POSTGRES_PORT'];
+	if (!$POSTGRES_DB && isset($_ENV['POSTGRES_DB'])) $POSTGRES_DB = $_ENV['POSTGRES_DB'];
+	if (!$POSTGRES_USER && isset($_ENV['POSTGRES_USER'])) $POSTGRES_USER = $_ENV['POSTGRES_USER'];
+	if (!$POSTGRES_PASSWORD && isset($_ENV['POSTGRES_PASSWORD'])) $POSTGRES_PASSWORD = $_ENV['POSTGRES_PASSWORD'];
 }
 
+// Set a default port if not provided
+$POSTGRES_PORT = $POSTGRES_PORT ?: '5432';
 
-
-DB::$dsn = 'pgsql:host='.$POSTGRES_HOST.';port=5432;dbname='.$POSTGRES_DB;
+DB::$dsn = 'pgsql:host='.$POSTGRES_HOST.';port='.$POSTGRES_PORT.';dbname='.$POSTGRES_DB;
 DB::$user = $POSTGRES_USER;
 DB::$password = $POSTGRES_PASSWORD;
 

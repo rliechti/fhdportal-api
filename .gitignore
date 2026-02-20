@@ -1,6 +1,10 @@
 
 ### Project ###
 
+# Binary files
+# /bin/fega*
+/bin/phpunit
+
 # FAKE SDA
 /sda
 
@@ -17,6 +21,8 @@ tools/local_version
 /.env.local.php
 /.env.*.local
 .env
+.htaccess
+tools/*.env
 
 # Transient files
 /var/
@@ -24,17 +30,10 @@ tools/local_version
 # Assets
 /public/bundles/
 
-
 ### IDE ###
 
 # VisualStudioCode
 .vscode/*
-!.vscode/settings.json
-!.vscode/tasks.json
-!.vscode/launch.json
-!.vscode/extensions.json
-!.vscode/*.code-snippets
-
 
 ### Operating System ###
 
@@ -62,3 +61,14 @@ data
 # Logs
 logs
 
+# cs-fixer
+.php-cs-fixer.cache
+
+###> phpstan/phpstan ###
+phpstan.neon
+###< phpstan/phpstan ###
+
+###> phpunit/phpunit ###
+/phpunit.xml
+/.phpunit.cache/
+###< phpunit/phpunit ###
