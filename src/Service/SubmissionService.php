@@ -4,7 +4,6 @@ namespace App\Service;
 
 use App\Service\Auth\Keycloak;
 use App\Service\Auth\KeycloakService;
-use App\Service\RabbitMq\RabbitMq;
 use App\Service\Dac\PolicyService;
 use Ramsey\Uuid\Uuid;
 use MeekroDB;
@@ -13,7 +12,6 @@ class SubmissionService
 {
     public function __construct(
         private MeekroDB $db,
-        private RabbitMq $rabbitMq,
         private PolicyService $policy,
         private KeycloakService $keycloak,
     ) {

@@ -3,7 +3,6 @@
 namespace App\Service\Dac;
 
 use App\Service\Auth\Keycloak;
-use App\Service\RabbitMq\RabbitMq;
 use MeekroDB;
 use Ramsey\Uuid\Uuid;
 use Symfony\Component\Mailer\Exception\TransportExceptionInterface;
@@ -16,14 +15,12 @@ class DatasetRequestService
     private MeekroDB $db;
     private MailerInterface $mailer;
     private SerializerInterface $serializer;
-    private RabbitMq $rabbitmq;
 
-    public function __construct(MeekroDB $db, MailerInterface $mailer, SerializerInterface $serializer, RabbitMq $rabbitmq)
+    public function __construct(MeekroDB $db, MailerInterface $mailer, SerializerInterface $serializer)
     {
         $this->db = $db;
         $this->mailer = $mailer;
         $this->serializer = $serializer;
-        $this->rabbitmq = $rabbitmq;
     }
 
 
@@ -166,16 +163,6 @@ class DatasetRequestService
         unset($request['action_time']);
         $this->db->insert("dataset_requests", $request);
         $new_request = $this->db->queryFirstRow("SELECT * from dataset_request_view where request_id = %s_id", $request);
-        $correlation_id = $this->db->queryFirstField("SELECT * from rmq_correlation where resource_id = %s_dataset_id and dataset_request_id = %s_id", $request);
-        if (!$correlation_id) {
-            $correlation = array(
-                "correlation_id" => Uuid::uuid4(),
-                "resource_id" => $new_request['dataset_id'],
-                "dataset_request_id" => $new_request['request_id']
-            );
-            $this->db->insert('rmq_correlation', $correlation);
-        }
-        $test = $this->rabbitmq->permissionDataset($new_request);
         return [
             "status"    => "success",
             "content"   => $new_request,
