@@ -378,9 +378,19 @@ final class ResourceEditService
             if ($x['prop_name']) {
                 if ($x['id']) {
                     $this->relationshipService->createRelationship($x['prop_name'], $resourceType['name'], $x['id'], $data['id'], false);
+                    if ($x['prop_name'] == 'SdaFile'){
+                        if ($studyId && $studyId !== 'new') {
+                            $this->relationshipService->createRelationship($x['prop_name'], 'Study', $x['id'], $studyId, false);
+                        }
+                    }
                 } elseif (count($x['ids'])) {
                     foreach ($x['ids'] as $xid) {
                         $this->relationshipService->createRelationship($x['prop_name'], $resourceType['name'], $xid, $data['id'], false);
+                        if ($x['prop_name'] == 'SdaFile'){
+                            if ($studyId && $studyId !== 'new') {
+                                $this->relationshipService->createRelationship($x['prop_name'], 'Study', $xid, $studyId, false);
+                            }
+                        }
                     }
                 }
             }
