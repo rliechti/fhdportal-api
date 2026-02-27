@@ -270,7 +270,7 @@ final class ResourceEditService
         }
         
         foreach ($propertiesArray as $k => $v) {
-            if (isset($schemaProperties[$k]) && $k !== 'files' && $k !== 'sdafile_public_ids') {
+            if (isset($schemaProperties[$k]) && $k !== 'files' && $k !== 'sdafile_public_ids' && strpos($k,'public_id') === FALSE) {
                 if (isset($schemaProperties[$k]['type']) && $schemaProperties[$k]['type'] == 'array' && gettype($v) == 'string') {
                     $dataProperties[$k] = [$v];
                 } else {
@@ -289,6 +289,9 @@ final class ResourceEditService
                             }
                         }
                     } else {
+                        if (strpos($k,'_public_id') !== FALSE && !$xref[$k]['prop_name']){
+                            $xref[$k]['prop_name'] = strstr($k,'_public_id',true);
+                        }
                         if ($xref[$k]['prop_name']) {
                             $tableName = strtolower($xref[$k]['prop_name']) . "_view";
                         }

@@ -27,16 +27,16 @@ class ResourceRelationshipService
     public function createRelationship(string $domain_type_name, string $range_type_name, string $domain_id, string $range_id, bool $verbose = false): void
     {
         $relation_rule = $this->db->queryFirstRow(
-            "SELECT id, predicate_id, default_is_active from relationship_rule_view where predicate_name = 'isPartOf' and domain_type_name = %s and range_type_name = %s",
-            $domain_type_name,
-            $range_type_name
+            "SELECT id, predicate_id, default_is_active from relationship_rule_view where predicate_name = 'isPartOf' and lower(domain_type_name) = %s and lower(range_type_name) = %s",
+            strtolower($domain_type_name),
+            strtolower($range_type_name)
         );
 
         if (!$relation_rule) {
             $relation_rule = $this->db->queryFirstRow(
-                "SELECT id, predicate_id, default_is_active from relationship_rule_view where predicate_name = 'isLinkedTo' and domain_type_name = %s and range_type_name = %s",
-                $range_type_name,
-                $domain_type_name
+                "SELECT id, predicate_id, default_is_active from relationship_rule_view where predicate_name = 'isLinkedTo' and lower(domain_type_name) = %s and lower(range_type_name) = %s",
+                strtolower($range_type_name),
+                strtolower($domain_type_name)
             );
             if ($relation_rule) {
                 $tmp_id = $domain_id;
