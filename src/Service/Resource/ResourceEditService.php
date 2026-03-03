@@ -341,7 +341,7 @@ final class ResourceEditService
                 }
             } elseif ($k == 'id' && $this->helper->checkUuid($v)) {
                 //do nothing
-            } elseif (isset($schemaProperties['extra_attributes'])) {
+            } elseif (isset($schemaProperties['extra_attributes']) && $k !=='public_id') {
                 $tag = null;
                 $unit = "";
                 $value = $v;
