@@ -4,7 +4,7 @@ namespace App\Service\Dac;
 
 use App\Service\Auth\Keycloak;
 use App\Service\Dac\DacRequestService;
-// use App\Service\RabbitMq\RabbitMqInterface;
+use App\Service\RabbitMq\RabbitMqInterface;
 use App\Service\Utility\GeneralHelperService;
 use MeekroDB;
 use Ramsey\Uuid\Uuid;
@@ -19,7 +19,7 @@ class PolicyService
     private MeekroDB $db;
     private MailerInterface $mailer;
     private SerializerInterface $serializer;
-    // private RabbitMqInterface $rabbitmq;
+    private RabbitMqInterface $rabbitmq;
     private HttpClientInterface $httpClient;
     private GeneralHelperService $helper;
     private DacRequestService $dac;
@@ -30,7 +30,7 @@ class PolicyService
         MeekroDB $db,
         MailerInterface $mailer,
         SerializerInterface $serializer,
-        // RabbitMqInterface $rabbitmq,
+        RabbitMqInterface $rabbitmq,
         HttpClientInterface $httpClient,
         GeneralHelperService $helper,
         DacRequestService $dac,

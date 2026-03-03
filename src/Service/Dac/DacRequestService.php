@@ -3,7 +3,7 @@
 namespace App\Service\Dac;
 
 use App\Service\Auth\Keycloak;
-// use App\Service\RabbitMq\RabbitMqInterface;
+use App\Service\RabbitMq\RabbitMqInterface;
 use App\Service\Utility\GeneralHelperService;
 use MeekroDB;
 use Symfony\Component\Mailer\MailerInterface;
@@ -15,12 +15,11 @@ class DacRequestService
     private MeekroDB $db;
     private MailerInterface $mailer;
     private SerializerInterface $serializer;
-    // private RabbitMqInterface $rabbitmq;
+    private RabbitMqInterface $rabbitmq;
     private HttpClientInterface $httpClient;
     private GeneralHelperService $helper;
 
-    // public function __construct(MeekroDB $db, MailerInterface $mailer, SerializerInterface $serializer, RabbitMqInterface $rabbitmq, HttpClientInterface $httpClient, GeneralHelperService $helper)
-    public function __construct(MeekroDB $db, MailerInterface $mailer, SerializerInterface $serializer,  HttpClientInterface $httpClient, GeneralHelperService $helper)
+    public function __construct(MeekroDB $db, MailerInterface $mailer, SerializerInterface $serializer, RabbitMqInterface $rabbitmq, HttpClientInterface $httpClient, GeneralHelperService $helper)
     {
         $this->db = $db;
         $this->mailer = $mailer;

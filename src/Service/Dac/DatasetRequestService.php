@@ -3,7 +3,7 @@
 namespace App\Service\Dac;
 
 use App\Service\Auth\Keycloak;
-// use App\Service\RabbitMq\RabbitMq;
+use App\Service\RabbitMq\RabbitMq;
 use MeekroDB;
 use Ramsey\Uuid\Uuid;
 use Symfony\Component\Mailer\Exception\TransportExceptionInterface;
@@ -16,10 +16,9 @@ class DatasetRequestService
     private MeekroDB $db;
     private MailerInterface $mailer;
     private SerializerInterface $serializer;
-    // private RabbitMq $rabbitmq;
+    private RabbitMq $rabbitmq;
 
-    // public function __construct(MeekroDB $db, MailerInterface $mailer, SerializerInterface $serializer, RabbitMq $rabbitmq)
-    public function __construct(MeekroDB $db, MailerInterface $mailer, SerializerInterface $serializer)
+    public function __construct(MeekroDB $db, MailerInterface $mailer, SerializerInterface $serializer, RabbitMq $rabbitmq)
     {
         $this->db = $db;
         $this->mailer = $mailer;

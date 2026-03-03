@@ -8,7 +8,7 @@ use App\Service\Dac\PolicyService;
 use App\Service\File\FileReadService;
 use App\Service\JsonSchema\Validator;
 use App\Service\PublicationService;
-// use App\Service\RabbitMq\RabbitMqInterface;
+use App\Service\RabbitMq\RabbitMqInterface;
 use App\Service\Resource\ResourceEditService;
 use App\Service\Resource\ResourceExportService;
 use App\Service\Resource\ResourceReadService;
@@ -40,7 +40,7 @@ class SubmissionController extends AbstractController
         private FileReadService $fileRead,
         private GeneralHelperService $helper,
         private MeekroDB $db,
-        // private RabbitMqInterface $rabbitMq,
+        private RabbitMqInterface $rabbitMq,
         private PolicyService $policy,
         private KeycloakService $keycloak,
         private SubmissionService $submissionService
