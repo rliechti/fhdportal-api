@@ -26,9 +26,9 @@ class ResourceRelationshipService
      */
     public function createRelationship(string $domain_type_name, string $range_type_name, string $domain_id, string $range_id, int $userId, bool $verbose = false): string
     {
-		$existing_relation='';
+		$existing_relation=array("id" => null);
         $relation_rule = $this->db->queryFirstRow(
-            "SELECT id, predicate_id, default_is_active from relationship_rule_view where predicate_name = 'isPartOf' and lower(domain_type_name) = %s and lower(range_type_name) = %s",
+            "SELECT id, predicate_id, default_is_active from relationship_rule_view where predicate_name in ('isPartOf','isProcessedIn') and lower(domain_type_name) = %s and lower(range_type_name) = %s",
             strtolower($domain_type_name),
             strtolower($range_type_name)
         );
