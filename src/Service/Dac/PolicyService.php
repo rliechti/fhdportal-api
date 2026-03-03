@@ -4,6 +4,7 @@ namespace App\Service\Dac;
 
 use App\Service\Auth\Keycloak;
 use App\Service\Dac\DacRequestService;
+use App\Service\RabbitMq\RabbitMqInterface;
 use App\Service\Utility\GeneralHelperService;
 use MeekroDB;
 use Ramsey\Uuid\Uuid;
@@ -11,32 +12,39 @@ use Symfony\Component\Mailer\MailerInterface;
 use Symfony\Component\Serializer\SerializerInterface;
 use Symfony\Component\Validator\Validator\ValidatorInterface;
 use Symfony\Contracts\HttpClient\HttpClientInterface;
+use App\Service\Resource\ResourceRelationshipService;
 
 class PolicyService
 {
     private MeekroDB $db;
     private MailerInterface $mailer;
     private SerializerInterface $serializer;
+    private RabbitMqInterface $rabbitmq;
     private HttpClientInterface $httpClient;
     private GeneralHelperService $helper;
     private DacRequestService $dac;
     private ValidatorInterface $validator;
+    private ResourceRelationshipService $relationshipService;
 
     public function __construct(
         MeekroDB $db,
         MailerInterface $mailer,
         SerializerInterface $serializer,
+        RabbitMqInterface $rabbitmq,
         HttpClientInterface $httpClient,
         GeneralHelperService $helper,
         DacRequestService $dac,
+		ResourceRelationshipService $relationshipService,
         ValidatorInterface $validator
     ) {
         $this->db = $db;
         $this->mailer = $mailer;
         $this->serializer = $serializer;
+        $this->rabbitmq = $rabbitmq;
         $this->httpClient = $httpClient;
         $this->helper = $helper;
         $this->dac = $dac;
+        $this->relationshipService = $relationshipService;
         $this->validator = $validator;
         $this->httpClient->withOptions([
             'verify_peer' => true,
@@ -74,7 +82,7 @@ class PolicyService
 
         $response = $this->httpClient->request(
             'GET',
-            $_SERVER['DAC_API'] . '/submissions',
+            $_ENV['DAC_API'] . '/submissions',
             [
                 'headers' => [
                     'Content-Type'  => 'application/json',
@@ -122,7 +130,7 @@ class PolicyService
 
         $response = $this->httpClient->request(
             'GET',
-            $_SERVER['DAC_API'] . '/policies',
+            $_ENV['DAC_API'] . '/policies',
             [
                 'headers' => [
                     'Content-Type'  => 'application/json',
@@ -145,7 +153,7 @@ class PolicyService
                 if (!isset($dacs[$p['dacID']])) {
                     $dacResponse = $this->httpClient->request(
                         'GET',
-                        $_SERVER['DAC_API'] . '/dacs/' . $p['dacID'],
+                        $_ENV['DAC_API'] . '/dacs/' . $p['dacID'],
                         [
                             'headers' => [
                                 'Content-Type'  => 'application/json',
@@ -190,7 +198,7 @@ class PolicyService
 
         $response = $this->httpClient->request(
             'GET',
-            $_SERVER['DAC_API'] . '/policies/' . $policyId,
+            $_ENV['DAC_API'] . '/policies/' . $policyId,
             [
                 'headers' => [
                     'Content-Type'  => 'application/json',
@@ -291,56 +299,67 @@ class PolicyService
                 );
             }
         }
+		
 
-        $relationshipId = $this->db->queryFirstField(
-            'SELECT id
-             FROM relationship
-             WHERE domain_resource_id = %s
-               AND range_resource_id = %s',
-            $datasetId,
-            $policyId
-        );
-
-        if (!$relationshipId) {
-            $uuid = Uuid::uuid4();
-            $relationshipId = $uuid->toString();
-
-            $relationshipRuleId = $this->db->queryFirstField(
-                'SELECT id
-                 FROM relationship_rule_view
-                 WHERE domain_type_name = \'Dataset\'
-                   AND range_type_name = \'Policy\''
-            );
-
-            if ($relationshipRuleId) {
-                $relationship = [
-                    'id'                 => $relationshipId,
-                    'relationship_rule_id' => $relationshipRuleId,
-                    'domain_resource_id' => $datasetId,
-                    'predicate_id'       => 1,
-                    'range_resource_id'  => $policyId,
-                    'sequence_number'    => 1,
-                    'is_active'          => true,
-                ];
-
-                $this->db->insert('relationship', $relationship);
-
-                $relationshipId = $this->db->queryFirstField(
-                    'SELECT id
-                     FROM relationship
-                     WHERE domain_resource_id = %s
-                       AND range_resource_id = %s',
-                    $datasetId,
-                    $policyId
-                );
-            } else {
-                return array(
-                    "success" => false,
-                    "error" => 'Error: unable to register the link between Dataset and Policy',
-                    "status" => 500
-                );
-            }
-        }
+		// TODO : use ResourceRelationshipService
+		$user = $auth->getDetails();
+		$relation_id = $this->relationshipService->createRelationship('Dataset','Policy',$datasetId, $policyId,$user['id'],false);
+		if(!$relation_id){
+			return array(
+				"success" => false,
+				"error" => 'Error: unable to register the link between Dataset and Policy',
+				"status" => 500
+			);
+		}
+        // $relationshipId = $this->db->queryFirstField(
+     //        'SELECT id
+     //         FROM relationship
+     //         WHERE domain_resource_id = %s
+     //           AND range_resource_id = %s',
+     //        $datasetId,
+     //        $policyId
+     //    );
+     //
+     //    if (!$relationshipId) {
+     //        $uuid = Uuid::uuid4();
+     //        $relationshipId = $uuid->toString();
+     //
+     //        $relationshipRuleId = $this->db->queryFirstField(
+     //            'SELECT id
+     //             FROM relationship_rule_view
+     //             WHERE domain_type_name = \'Dataset\'
+     //               AND range_type_name = \'Policy\''
+     //        );
+     //
+     //        if ($relationshipRuleId) {
+     //            $relationship = [
+     //                'id'                 => $relationshipId,
+     //                'relationship_rule_id' => $relationshipRuleId,
+     //                'domain_resource_id' => $datasetId,
+     //                'predicate_id'       => 1,
+     //                'range_resource_id'  => $policyId,
+     //                'sequence_number'    => 1,
+     //                'is_active'          => true,
+     //            ];
+     //
+     //            $this->db->insert('relationship', $relationship);
+     //
+     //            $relationshipId = $this->db->queryFirstField(
+     //                'SELECT id
+     //                 FROM relationship
+     //                 WHERE domain_resource_id = %s
+     //                   AND range_resource_id = %s',
+     //                $datasetId,
+     //                $policyId
+     //            );
+     //        } else {
+     //            return array(
+     //                "success" => false,
+     //                "error" => 'Error: unable to register the link between Dataset and Policy',
+     //                "status" => 500
+     //            );
+     //        }
+     //    }
 
         $token = $auth->getBearerToken();
         $dacSubmission = $this->getDatasetPolicy($auth, $datasetId);
@@ -361,7 +380,7 @@ class PolicyService
 
             $response = $this->httpClient->request(
                 'POST',
-                $_SERVER['DAC_API'] . '/submissions',
+                $_ENV['DAC_API'] . '/submissions',
                 [
                     'headers' => [
                         'Content-Type'  => 'application/json',
@@ -401,7 +420,7 @@ class PolicyService
 
         $response = $this->httpClient->request(
             'GET',
-            $_SERVER['DAC_API'] . '/policies/' . $policyId . '/' . $form,
+            $_ENV['DAC_API'] . '/policies/' . $policyId . '/' . $form,
             [
                 'headers' => [
                     'Content-Type'  => 'application/json',

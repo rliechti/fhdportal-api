@@ -50,7 +50,8 @@ class DacController extends AbstractController
         $limit = 99;
         $totalCount = -1;
 
-        // TODO: remove in production
+
+        $dacs = array();
         $dacs = $this->policyService->fetchPolicies($auth, $offset, $limit, $dacs);
 
         $json_content = json_encode($dacs);

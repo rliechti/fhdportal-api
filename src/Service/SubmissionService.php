@@ -4,17 +4,23 @@ namespace App\Service;
 
 use App\Service\Auth\Keycloak;
 use App\Service\Auth\KeycloakService;
+use App\Service\RabbitMq\RabbitMqInterface;
 use App\Service\Dac\PolicyService;
+use App\Service\Resource\ResourceRelationshipService;
 use Ramsey\Uuid\Uuid;
 use MeekroDB;
 
 class SubmissionService
 {
+    private ResourceRelationshipService $relationshipService;
     public function __construct(
         private MeekroDB $db,
+        private RabbitMqInterface $rabbitMq,
         private PolicyService $policy,
         private KeycloakService $keycloak,
+	    ResourceRelationshipService $relationshipService,
     ) {
+	    $this->relationshipService = $relationshipService;
     }
 
     public function handleSubmission(Keycloak $auth, string $studyId, string $field, array $user): array
@@ -26,7 +32,7 @@ class SubmissionService
             $studyId
         );
 
-        if ($sdafiles && isset($_SERVER['MQ_HOST'])) {
+        if ($sdafiles && isset($_ENV['MQ_HOST'])) {
             $this->rabbitMq->mapSDAfiles($sdafiles);
         }
 
@@ -91,26 +97,28 @@ class SubmissionService
                 'properties'     => $properties,
             ]);
 
-            $relationshipId = $this->db->queryFirstField(
-                "SELECT id
-                 FROM relationship
-                 WHERE domain_resource_id = %s_dataset_id
-                   AND range_resource_id = %s_policy_id",
-                $d
-            );
 
-            if ($relationshipId) {
-                $this->db->update('relationship', ['is_active' => false], 'id = %s', $relationshipId);
-
-                $relLogId = Uuid::uuid4()->toString();
-
-                $this->db->insert('relationship_log', [
-                    'id'              => $relLogId,
-                    'relationship_id' => $relationshipId,
-                    'user_id'         => $user['id'],
-                    'action_type_id'  => 'DEL',
-                ]);
-            }
+			$this->relationshipService->updateRelationshipStatus($d['dataset_id'],$d['policy_id'],false,$user['id']);
+            // $relationshipId = $this->db->queryFirstField(
+ //                "SELECT id
+ //                 FROM relationship
+ //                 WHERE domain_resource_id = %s_dataset_id
+ //                   AND range_resource_id = %s_policy_id",
+ //                $d
+ //            );
+ //
+ //            if ($relationshipId) {
+ //                $this->db->update('relationship', ['is_active' => false], 'id = %s', $relationshipId);
+ //
+ //                $relLogId = Uuid::uuid4()->toString();
+ //
+ //                $this->db->insert('relationship_log', [
+ //                    'id'              => $relLogId,
+ //                    'relationship_id' => $relationshipId,
+ //                    'user_id'         => $user['id'],
+ //                    'action_type_id'  => 'DEL',
+ //                ]);
+ //            }
 
             $policy = $this->policy->getPolicy($auth, $d['policy_id'], true);
             $this->syncDacMembersAcl($policy, $d['study_id'], $grant = false);

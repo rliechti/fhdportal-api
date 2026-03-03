@@ -121,12 +121,13 @@ class ResourceImportService
                 $studyId = $inserted['resources'][0]['id'] ?? $studyId;
             }
         }
-
-        return [
+		$return = array(
             'success' => true,
             'message' => 'Bundle imported successfully',
             'resource_count' => array_sum(array_column($outputResources, 'resource_count')),
             'resources' => $outputResources,
-        ];
+		);
+
+        return $return;
     }
 }

@@ -45,7 +45,7 @@ class ValidationService
             ]);
             $result = $this->cliValidator->validateResourceData($data, $resourceType);
             if ($userId && $userId !== 0) {
-                $resultXRef = $this->validateXRefs($data, $resourceType, $userId);
+                $resultXRef = $this->validateXRefs($result,$data, $resourceType, $userId,1);
                 if ($resultXRef['status'] !== 'SUCCESS') {
                     return [
                         'success' => false,
@@ -106,15 +106,15 @@ class ValidationService
             $extension = strtolower(pathinfo($filePath, PATHINFO_EXTENSION));
 
             $data = $this->cliValidator->validateFile($filePath, $resourceType, 'json');
-
+			
             // we don't need to validate json files has they have been already validated in ResourceEditService::editResource or if studyId == new
-			//
-            if ($userId && $userId !== 0 && $data['success'] && $extension !== 'json' && $studyId !== 'new') {
+
+            if ($userId && $userId !== 0 && $data['success'] && $extension !== 'json' ) {
             // if ($userId && $userId !== 0 && $data['success'] && $extension !== 'json' && $studyId !== 'new') {
                 if ($resourceType == 'SubmissionBundle') {
                     foreach ($data['result']['output'] as $resourceType => $resourceData) {
                         foreach ($resourceData['data'] as $d) {
-                            $resultXRef = $this->validateXRefs($d['data'], $resourceType, $userId);
+                            $resultXRef = $this->validateXRefs($data['result']['output'], $d['data'], $resourceType, $userId, $studyId);
                             if ($resultXRef['status'] !== 'SUCCESS') {
 								foreach($data['result']['output'] as $rt=>$rd){
 									if($rt == $resourceType){
@@ -122,19 +122,17 @@ class ValidationService
 										$data['result']['output'][$rt]['message']=$resultXRef['message'].".  " . implode(", ",$resultXRef['errors']);
 									}
 								}
-                                // $data['success'] = false;
                                 $data['result']['status'] = 'FAIL';
                                 $data['result']['success'] = false;
-                                // $data['message'] = $resultXRef['message'];
                                 $data['result']['message'] = $resultXRef['message'];
-                                // $data['errors'] = $resultXRef['errors'];
-                            }
+	                            return $data['result'];
+							}
                         }
                     }
-					return $data['result'];
+					return $data;
                 } else {
                     foreach ($data['result']['data'] as $d) {
-                        $resultXRef = $this->validateXRefs($d['data'], $resourceType, $userId);
+                        $resultXRef = $this->validateXRefs($data['result']['data'],$d['data'], $resourceType, $userId, $studyId);
                         if ($resultXRef['status'] !== 'SUCCESS') {
                             $data['success'] = false;
                             $data['result']['status'] = 'FAIL';
@@ -186,14 +184,18 @@ class ValidationService
         ];
     }
 
-    public function validateXRefs(mixed $data, string $resourceType, int $userId): array
+    public function validateXRefs(mixed $output, mixed $data, string $resourceType, int $userId, string $studyId): array
     {
         $return = array(
             "status" => "SUCCESS",
+			"success"=>true,
             "message" => "",
             "errors" => array()
         );
+
         $data = is_string($data) ? json_decode($data, true) : $data;
+		
+
         $xResourceSchemaJson = $this->db->queryFirstField(
             "
             SELECT resource_type.properties -> 'data_schema' -> 'x-resource' ->> 'schema'
@@ -263,21 +265,32 @@ class ValidationService
                     $values2check[] = $data[$field];
                 }
                 foreach ($values2check as $value) {
+					$xref_id = null;
 					preg_match('/CHFEG[A-Z]{2}\d{11}/', $value, $outputregex);
 					if(!count($outputregex) && $sqlField =='public_id') $sqlField = 'title';
 
-                    $xref_id = $this->db->queryFirstField(
-                        "SELECT
-                        id
-                    FROM
-                    ".$xrefsField['db_view']."
-                    inner join resource_acl on ".$xrefsField['db_view'].".id = resource_acl.resource_id and resource_acl.role_id IN ('OWN', 'WRI')
-                    WHERE
-                    ".$sqlField." = %s_value
-                    and resource_acl.user_id = %i_userId;
-                    ",
-                        array("value" => $value, "userId" => $userId)
-                    );
+					if($studyId == 'new' && $xrefsField['db_view'] != 'sdafile_view'){
+						foreach($output[$xrefsField['resource']]['data'] as $d){
+							if($d['data'][$sqlField]==$value){
+								$xref_id = true;
+							}
+						}
+					}
+					else{
+	                    $xref_id = $this->db->queryFirstField(
+	                        "SELECT
+	                        id
+	                    FROM
+	                    ".$xrefsField['db_view']."
+	                    inner join resource_acl on ".$xrefsField['db_view'].".id = resource_acl.resource_id and resource_acl.role_id IN ('OWN', 'WRI')
+	                    WHERE
+	                    ".$sqlField." = %s_value
+	                    and resource_acl.user_id = %i_userId;
+	                    ",
+	                        array("value" => $value, "userId" => $userId)
+	                    );
+					}
+
                     if (!$xref_id) {
                         $return['status'] = "FAIL";
                         $return['message'] = "At least one referenced resource couldn't be linked";

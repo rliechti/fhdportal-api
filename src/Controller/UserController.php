@@ -7,6 +7,7 @@ use App\Service\User\UserKeyService;
 use App\Service\User\UserReadService;
 use App\Service\User\UserRoleReadService;
 use App\Service\User\UserRoleRequestService;
+use MeekroDB;
 use OpenApi\Attributes as OA;
 use Symfony\Bundle\FrameworkBundle\Controller\AbstractController;
 use Symfony\Component\HttpFoundation\JsonResponse;
@@ -76,6 +77,45 @@ final class UserController extends AbstractController
         $users = $this->userRead->findUsers(email: $email);
 
         return $this->json($users);
+    }
+
+    #[Route('/users/dtpa', name: 'get_user_dtpas', methods: ['GET'])]
+    #[OA\Get(
+        path: '/api/users/dtpa',
+        summary: 'Get DTPA submissions for the current user',
+        tags: ['Users'],
+        responses: [
+            new OA\Response(
+                response: 200,
+                description: 'List of DTPA submissions',
+                content: new OA\JsonContent(type: 'array', items: new OA\Items(type: 'object'))
+            ),
+            new OA\Response(response: 401, description: 'Unauthorized')
+        ]
+    )]
+    public function getUserDTPA(Keycloak $auth, MeekroDB $db): JsonResponse
+    {
+        if ($auth->isGuest()) {
+            return $this->json(['message' => 'Unauthorized'], 401);
+        }
+
+        $user = $auth->getDetails();
+        $dtpas = $db->query(
+            "SELECT
+                r.properties->>'mime_type' as dtpa_document_type,
+                r.properties->>'original_name' as dtpa_document_name,
+                rl.action_time as request_date
+             FROM resource r
+             JOIN resource_log rl ON r.id = rl.resource_id
+             JOIN resource_type rt ON r.resource_type_id = rt.id
+             WHERE rt.name = 'File'
+               AND r.properties->>'name' LIKE '/data/dtpas/%'
+               AND rl.user_id = %i
+             ORDER BY rl.action_time DESC",
+            $user['id']
+        );
+
+        return $this->json($dtpas ?: []);
     }
 
     #[Route('/users/request', name: 'send_user_request', methods: ['POST'])]

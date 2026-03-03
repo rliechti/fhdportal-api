@@ -7,10 +7,10 @@ use App\Service\Utility\GeneralHelperService;
 use MeekroDB;
 use ReallySimpleJWT\Token;
 
-$KEYCLOAK_SECRET = $_SERVER['KEYCLOAK_SECRET'];
-$KEYCLOAK_REALM = $_SERVER['KEYCLOAK_REALM'];
-$KEYCLOAK_CLIENT_ID = $_SERVER['KEYCLOAK_CLIENT_ID'];
-$KEYCLOAK_URL = rtrim($_SERVER['KEYCLOAK_URL'], '/') . "/";
+$KEYCLOAK_SECRET    = $_ENV['KEYCLOAK_SECRET'];
+$KEYCLOAK_REALM     = $_ENV['KEYCLOAK_REALM'];
+$KEYCLOAK_CLIENT_ID = $_ENV['KEYCLOAK_CLIENT_ID'];
+$KEYCLOAK_URL       = rtrim($_ENV['KEYCLOAK_URL'], '/') . "/";
 
 if (!defined("KEYCLOAK_URL")) {
     define("KEYCLOAK_URL", $KEYCLOAK_URL);

@@ -30,7 +30,12 @@ class DatasetController extends ResourceController
         $datasets = json_decode($parentResponse->getContent(), true);
 
         foreach ($datasets as $idx => $dataset) {
-            $policy = $this->dac->getDatasetPolicy($auth, $dataset['id']);
+           
+           $policy = array();           
+           $policy = $this->dac->getDatasetPolicy($auth, $dataset['id']);
+
+           
+           
             foreach ($policy as $key => $value) {
                 $datasets[$idx]['policy_' . $key] = $value;
             }
@@ -52,7 +57,8 @@ class DatasetController extends ResourceController
     {
         $parentResponse = parent::putResource($request, $auth, $study_id, $dataset_id);
         $dataset = json_decode($parentResponse->getContent(), true);
-
+        
+        $policyRequest = array("status" => null);
         $policyRequest = $this->dac->getDatasetPolicy($auth, $dataset_id);
         if ($policyRequest['status'] == 'success') {
             foreach ($policyRequest['policy'] as $key => $value) {

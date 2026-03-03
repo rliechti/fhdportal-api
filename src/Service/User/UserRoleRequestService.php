@@ -195,8 +195,8 @@ class UserRoleRequestService
         $title = "FEGA user request";
         $content = implode("", $contents) . "\r\n\r\n";
         $email = (new Email())
-            ->from($_SERVER['NO_REPLY_EMAIL'])
-            ->to($_SERVER['HELPDESK_EMAIL'])
+            ->from($_ENV['NO_REPLY_EMAIL'])
+            ->to($_ENV['HELPDESK_EMAIL'])
             ->subject($title)
             ->text($content);
 

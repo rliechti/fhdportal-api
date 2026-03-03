@@ -8,6 +8,7 @@ parameters:
   fega_cli_path_default: '%kernel.project_dir%/bin'
   fega_schema_dir: '%env(default:fega_schema_dir_default:FEGA_SCHEMA_DIR)%'
   fega_schema_dir_default: '%kernel.project_dir%/data/schemas'
+  rabbitmq_enabled_default: 'true'
   app.db.host: '%env(string:POSTGRES_HOST)%'
   app.db.user: '%env(string:POSTGRES_USER)%'
   app.db.pass: '%env(string:POSTGRES_PASSWORD)%'
@@ -50,3 +51,10 @@ services:
       - '%app.db.pass%'
       - '%app.db.name%'
       - '%app.db.charset%'
+
+  # RabbitMQ toggle: set RABBITMQ_ENABLED=false to use the no-op implementation.
+  App\Service\RabbitMq\RabbitMqInterface:
+    factory: ['App\Service\RabbitMq\RabbitMqFactory', 'create']
+    arguments:
+      - '%env(default:rabbitmq_enabled_default:RABBITMQ_ENABLED)%'
+      - '@MeekroDB'

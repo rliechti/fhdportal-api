@@ -7,6 +7,7 @@ use App\Service\File\FileImportHelper;
 use App\Service\JsonSchema\Validator;
 use App\Service\Resource\ResourceImportService;
 use App\Service\Resource\ResourceRelationshipService;
+use App\Service\RabbitMq\RabbitMqInterface;
 use App\Service\Resource\ResourceReadService;
 use App\Service\Utility\GeneralHelperService;
 use App\Service\Validation\ValidationService;
@@ -19,7 +20,7 @@ use Symfony\Component\HttpKernel\Exception\HttpException;
 use Symfony\Component\HttpKernel\Exception\NotFoundHttpException;
 use Symfony\Component\Serializer\SerializerInterface;
 use Symfony\Component\Yaml\Yaml;
-
+use Psr\Log\LoggerInterface;
 /**
  * Service responsible for editing resource statuses.
  */
@@ -27,6 +28,7 @@ final class ResourceEditService
 {
     private MeekroDB $db;
     private Keycloak $auth;
+    private RabbitMqInterface $rabbitMq;
     private GeneralHelperService $helper;
     private ResourceReadService $resource;
     private Validator $validator;
@@ -35,10 +37,12 @@ final class ResourceEditService
     private FileImportHelper $fileHelper;
     private ResourceRelationshipService $relationshipService;
     private ResourceImportService $importService;
+    // private LoggerInterface $logger;
 
     public function __construct(
         MeekroDB $db,
         Keycloak $auth,
+        RabbitMqInterface $rabbitMq,
         GeneralHelperService $helper,
         ResourceReadService $resource,
         Validator $validator,
@@ -46,10 +50,12 @@ final class ResourceEditService
         ValidationService $validation,
         FileImportHelper $fileHelper,
         ResourceRelationshipService $relationshipService,
-        ResourceImportService $importService
+        ResourceImportService $importService,
+        // LoggerInterface $logger
     ) {
         $this->db = $db;
         $this->auth = $auth;
+        $this->rabbitMq = $rabbitMq;
         $this->helper = $helper;
         $this->resource = $resource;
         $this->validator = $validator;
@@ -58,7 +64,7 @@ final class ResourceEditService
         $this->fileHelper = $fileHelper;
         $this->relationshipService = $relationshipService;
         $this->importService = $importService;
-
+        // $this->logger = $logger;
         // resolve circular dependency
         $this->importService->setResourceEditService($this);
     }
@@ -101,7 +107,6 @@ final class ResourceEditService
      */
     private function insertResourceFromProperties(string $studyId, array $resourceType, object $properties, int $userId, string $roleId): array
     {
-
         $data = [
             'id' => null,
             'properties' => null,
@@ -223,6 +228,7 @@ final class ResourceEditService
 	            WHERE resource_acl.user_id = %i_userId
 	                AND resource_type.name = %s_resourceTypeName" .
                 ($whereConditions ? ' AND ' . implode(' AND ', $whereConditions) : '');
+                
             $existingResource = $this->db->queryFirstRow($query, $queryParams);
 
             if ($existingResource) {
@@ -268,7 +274,8 @@ final class ResourceEditService
                 }
             }
         }
-        
+
+
         foreach ($propertiesArray as $k => $v) {
             if (isset($schemaProperties[$k]) && $k !== 'files' && $k !== 'sdafile_public_ids' && strpos($k,'public_id') === FALSE) {
                 if (isset($schemaProperties[$k]['type']) && $schemaProperties[$k]['type'] == 'array' && gettype($v) == 'string') {
@@ -280,6 +287,7 @@ final class ResourceEditService
             elseif (isset($xref[$k]) && isset($xref[$k]['alias'])) {
                 $alias = $xref[$k]['alias'];
                 if (isset($schemaProperties[$alias])) {
+
                     if (isset($schemaProperties[$alias]['enum'])) {
                         if (in_array($v, $schemaProperties[$alias]['enum'])) {
                             if ($xref[$k]['type'] == 'string') {
@@ -298,7 +306,6 @@ final class ResourceEditService
                         if ($k == 'files' || $k == 'sdafile_public_ids') {
                             $tableName = 'file_view';
                         }
-
                         if ($xref[$k]['type'] == 'string') {
                             $where_params = array('study_id' => $studyId, 'name' => $v);
                             $where = "study_id = %s_study_id and (title = %s_name or public_id=%s_name)";
@@ -322,6 +329,7 @@ final class ResourceEditService
                                     $where = "study_id = %s_study_id and (title = %s_name or public_id=%s_name)";
                                 }
                                 $fk_resource = $this->db->queryFirstRow("SELECT public_id, id from $tableName where $where;", $where_params);
+                                
                                 if ($fk_resource) {
                                     $public_ids[] = $fk_resource['public_id'];
                                     $xref[$k]['ids'][] = $fk_resource['id'];
@@ -371,33 +379,70 @@ final class ResourceEditService
         } else {
             $this->db->update('resource', $data, 'id = %s', $data['id']);
         }
+		
+		//Existing relationship
+		$existingRelationships = $this->db->query("SELECT id, domain_resource_id, range_resource_id from relationship_view where range_resource_id = %s", $data['id']);
+		
         // Create study relationship
         if ($studyId && $studyId !== 'new') {
-            $this->relationshipService->createRelationship($resourceType['name'], 'Study', $data['id'], $studyId, false);
+            $this->relationshipService->createRelationship($resourceType['name'], 'Study', $data['id'], $studyId, $userId, false);
         }
-
         // Create dependency relationships (public_id references)
         foreach ($xref as $k => $x) {
+			$relation_id=null;
             if ($x['prop_name']) {
                 if ($x['id']) {
-                    $this->relationshipService->createRelationship($x['prop_name'], $resourceType['name'], $x['id'], $data['id'], false);
+                    $relation_id = $this->relationshipService->createRelationship($x['prop_name'], $resourceType['name'], $x['id'], $data['id'], $userId, false);
+        			if($relation_id){
+        				foreach($existingRelationships as $idx => $r){
+        					if($r['id']==$relation_id){
+                                $existingRelationships[$idx]['still_exists'] = true;  
+        					} 
+        				}
+        			}
                     if ($x['prop_name'] == 'SdaFile'){
                         if ($studyId && $studyId !== 'new') {
-                            $this->relationshipService->createRelationship($x['prop_name'], 'Study', $x['id'], $studyId, false);
+                            $relation_id = $this->relationshipService->createRelationship($x['prop_name'], 'Study', $x['id'], $studyId, $userId, false);
+                			if($relation_id){
+                				foreach($existingRelationships as $idx => $r){
+                					if($r['id']==$relation_id){
+                                        $existingRelationships[$idx]['still_exists'] = true;  
+                					} 
+                				}
+                			}
                         }
                     }
                 } elseif (count($x['ids'])) {
                     foreach ($x['ids'] as $xid) {
-                        $this->relationshipService->createRelationship($x['prop_name'], $resourceType['name'], $xid, $data['id'], false);
+                        $relation_id = $this->relationshipService->createRelationship($x['prop_name'], $resourceType['name'], $xid, $data['id'], $userId, false);
+            			if($relation_id){
+            				foreach($existingRelationships as $idx => $r){
+            					if($r['id']==$relation_id){
+                                    $existingRelationships[$idx]['still_exists'] = true;  
+            					} 
+            				}
+            			}                        
                         if ($x['prop_name'] == 'SdaFile'){
                             if ($studyId && $studyId !== 'new') {
-                                $this->relationshipService->createRelationship($x['prop_name'], 'Study', $xid, $studyId, false);
+                                $relation_id = $this->relationshipService->createRelationship($x['prop_name'], 'Study', $xid, $studyId, $userId, false);
+                    			if($relation_id){
+                    				foreach($existingRelationships as $idx => $r){
+                    					if($r['id']==$relation_id){
+                                            $existingRelationships[$idx]['still_exists'] = true;  
+                    					} 
+                    				}
+                    			}
                             }
                         }
                     }
                 }
             }
         }
+		foreach($existingRelationships as $r){
+			if(!isset($r['still_exists'])){
+				$this->relationshipService->deleteRelationship($r['domain_resource_id'],$r['range_resource_id'], $userId);
+			}
+		}
 
         // Log the action
         $logUuid = Uuid::uuid4()->toString();
@@ -438,10 +483,9 @@ final class ResourceEditService
     }
 
 
-
-
-
-
+	public function findIfExistingRelation(){
+		
+	}
 
     public function insertResourceData(array $resourceData, string $resourceType, string $studyId): array
     {
@@ -983,6 +1027,7 @@ final class ResourceEditService
     {
         $studyId = $this->db->queryFirstField("SELECT range_resource_id as study_id from relationship_view where domain_resource_id = %s and range_type = 'Study'", $resource['id']);
         $policyId = $this->resolvePolicyId($patch);
+        $user = $auth->getDetails();
 
         if ($policyId && isset($patch['policy_status'])) {
             $isActive = str_starts_with(trim($patch['policy_status']), 'valid');
@@ -993,13 +1038,13 @@ final class ResourceEditService
             }
 
             if ($patch['policy_status'] === 'reject') {
-                $this->db->delete("relationship", "id = %s", $relationshipId);
+	            $this->relationshipService->deleteRelationship($resource['id'], $policyId, $user['id']);
                 $this->setResourceStatus($auth, $resource['id'], 'REV');
                 if ($studyId) {
                     $this->setResourceStatus($auth, $studyId, 'REV');
                 }
             } else {
-                $this->db->update("relationship", array("is_active" => $isActive), "id = %s", $relationshipId);
+				$this->relationshipService->updateRelationshipStatus($resource['id'], $policyId, $isActive, $user['id']);
                 $this->logAction($resource, 'PUB', $auth);
                 // update study status //
                 $studyDatasetStatus = $this->db->queryFirstColumn(
@@ -1025,6 +1070,7 @@ final class ResourceEditService
                 }
 
                 $email = $this->db->queryFirstField("SELECT \"user\".email FROM resource_acl INNER JOIN \"user\" ON resource_acl.user_id= \"user\".id WHERE resource_acl.resource_id=%s AND resource_acl.role_id='OWN';", $resource['id']);
+                $this->rabbitMq->releaseDataset($resource['public_id'], $email, time());
             }
         }
     }

@@ -8,6 +8,7 @@ use App\Service\Dac\PolicyService;
 use App\Service\File\FileReadService;
 use App\Service\JsonSchema\Validator;
 use App\Service\PublicationService;
+use App\Service\RabbitMq\RabbitMqInterface;
 use App\Service\Resource\ResourceEditService;
 use App\Service\Resource\ResourceExportService;
 use App\Service\Resource\ResourceReadService;
@@ -39,6 +40,7 @@ class SubmissionController extends AbstractController
         private FileReadService $fileRead,
         private GeneralHelperService $helper,
         private MeekroDB $db,
+        private RabbitMqInterface $rabbitMq,
         private PolicyService $policy,
         private KeycloakService $keycloak,
         private SubmissionService $submissionService
@@ -118,6 +120,26 @@ class SubmissionController extends AbstractController
         string $resource_type
     ): BinaryFileResponse {
         $project_dir = $this->getParameter('kernel.project_dir');
+
+        if (strtoupper($resource_type) === 'DTPA') {
+            if ($auth->isGuest()) {
+                throw new \RuntimeException('Unauthorized', 401);
+            }
+            $dtpaTemplatePath = $project_dir . '/legal_templates/SwissFEGA_DTPA.docx';
+            if (!file_exists($dtpaTemplatePath)) {
+                throw new NotFoundHttpException('DTPA template not found');
+            }
+            $response = new BinaryFileResponse($dtpaTemplatePath);
+            $response->headers->set(
+                'Content-Type',
+                'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
+            );
+            $response->setContentDisposition(
+                \Symfony\Component\HttpFoundation\ResponseHeaderBag::DISPOSITION_ATTACHMENT,
+                'SwissFEGA_DTPA.docx'
+            );
+            return $response;
+        }
 
         if (strtolower($resource_type) === 'submission') {
             $resource_types = $db->queryFirstColumn(
