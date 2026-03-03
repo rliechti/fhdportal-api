@@ -4,7 +4,7 @@ namespace App\Service;
 
 use App\Service\Auth\Keycloak;
 use App\Service\Auth\KeycloakService;
-use App\Service\RabbitMq\RabbitMqInterface;
+// use App\Service\RabbitMq\RabbitMqInterface;
 use App\Service\Dac\PolicyService;
 use App\Service\Resource\ResourceRelationshipService;
 use Ramsey\Uuid\Uuid;
@@ -15,7 +15,7 @@ class SubmissionService
     private ResourceRelationshipService $relationshipService;
     public function __construct(
         private MeekroDB $db,
-        private RabbitMqInterface $rabbitMq,
+        // private RabbitMqInterface $rabbitMq,
         private PolicyService $policy,
         private KeycloakService $keycloak,
 	    ResourceRelationshipService $relationshipService,
@@ -32,9 +32,9 @@ class SubmissionService
             $studyId
         );
 
-        if ($sdafiles && isset($_ENV['MQ_HOST'])) {
-            $this->rabbitMq->mapSDAfiles($sdafiles);
-        }
+        // if ($sdafiles && isset($_ENV['MQ_HOST'])) {
+        //     $this->rabbitMq->mapSDAfiles($sdafiles);
+        // }
 
         $datasets = $this->db->query(
             "SELECT id AS dataset_id, properties->>'policy_id' AS policy_id, study_id

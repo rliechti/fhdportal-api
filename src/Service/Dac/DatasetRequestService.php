@@ -3,7 +3,7 @@
 namespace App\Service\Dac;
 
 use App\Service\Auth\Keycloak;
-use App\Service\RabbitMq\RabbitMq;
+// use App\Service\RabbitMq\RabbitMq;
 use MeekroDB;
 use Ramsey\Uuid\Uuid;
 use Symfony\Component\Mailer\Exception\TransportExceptionInterface;
@@ -16,14 +16,15 @@ class DatasetRequestService
     private MeekroDB $db;
     private MailerInterface $mailer;
     private SerializerInterface $serializer;
-    private RabbitMq $rabbitmq;
+    // private RabbitMq $rabbitmq;
 
-    public function __construct(MeekroDB $db, MailerInterface $mailer, SerializerInterface $serializer, RabbitMq $rabbitmq)
+    // public function __construct(MeekroDB $db, MailerInterface $mailer, SerializerInterface $serializer, RabbitMq $rabbitmq)
+    public function __construct(MeekroDB $db, MailerInterface $mailer, SerializerInterface $serializer)
     {
         $this->db = $db;
         $this->mailer = $mailer;
         $this->serializer = $serializer;
-        $this->rabbitmq = $rabbitmq;
+        // $this->rabbitmq = $rabbitmq;
     }
 
 
@@ -175,7 +176,7 @@ class DatasetRequestService
             );
             $this->db->insert('rmq_correlation', $correlation);
         }
-        $test = $this->rabbitmq->permissionDataset($new_request);
+        // $test = $this->rabbitmq->permissionDataset($new_request);
         return [
             "status"    => "success",
             "content"   => $new_request,

@@ -7,7 +7,7 @@ use App\Service\File\FileImportHelper;
 use App\Service\JsonSchema\Validator;
 use App\Service\Resource\ResourceImportService;
 use App\Service\Resource\ResourceRelationshipService;
-use App\Service\RabbitMq\RabbitMqInterface;
+// use App\Service\RabbitMq\RabbitMqInterface;
 use App\Service\Resource\ResourceReadService;
 use App\Service\Utility\GeneralHelperService;
 use App\Service\Validation\ValidationService;
@@ -28,7 +28,7 @@ final class ResourceEditService
 {
     private MeekroDB $db;
     private Keycloak $auth;
-    private RabbitMqInterface $rabbitMq;
+    // private RabbitMqInterface $rabbitMq;
     private GeneralHelperService $helper;
     private ResourceReadService $resource;
     private Validator $validator;
@@ -42,7 +42,7 @@ final class ResourceEditService
     public function __construct(
         MeekroDB $db,
         Keycloak $auth,
-        RabbitMqInterface $rabbitMq,
+        // RabbitMqInterface $rabbitMq,
         GeneralHelperService $helper,
         ResourceReadService $resource,
         Validator $validator,
@@ -55,7 +55,7 @@ final class ResourceEditService
     ) {
         $this->db = $db;
         $this->auth = $auth;
-        $this->rabbitMq = $rabbitMq;
+        // $this->rabbitMq = $rabbitMq;
         $this->helper = $helper;
         $this->resource = $resource;
         $this->validator = $validator;
@@ -1070,7 +1070,7 @@ final class ResourceEditService
                 }
 
                 $email = $this->db->queryFirstField("SELECT \"user\".email FROM resource_acl INNER JOIN \"user\" ON resource_acl.user_id= \"user\".id WHERE resource_acl.resource_id=%s AND resource_acl.role_id='OWN';", $resource['id']);
-                $this->rabbitMq->releaseDataset($resource['public_id'], $email, time());
+                // $this->rabbitMq->releaseDataset($resource['public_id'], $email, time());
             }
         }
     }
