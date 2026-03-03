@@ -83,7 +83,7 @@ class ResourceRelationshipService
                 }
 
                 $this->db->insert("relationship", $relation);
-				$existing_relation = $relation['id']; 
+				$existing_relation = array('id'=>$relation['id']); 
 				$log_uuid = Uuid::uuid4();
 				$relation_log = [
 					'id' => $log_uuid->toString(),
