@@ -36,8 +36,8 @@ class ResourceRelationshipService
         if (!$relation_rule) {
             $relation_rule = $this->db->queryFirstRow(
                 "SELECT id, predicate_id, default_is_active from relationship_rule_view where predicate_name = 'isLinkedTo' and lower(domain_type_name) = %s and lower(range_type_name) = %s",
-                strtolower($range_type_name),
-                strtolower($domain_type_name)
+                strtolower($domain_type_name),
+                strtolower($range_type_name)
             );
             if ($relation_rule) {
                 $tmp_id = $domain_id;
