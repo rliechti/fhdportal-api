@@ -30,18 +30,18 @@ class DatasetController extends ResourceController
         $datasets = json_decode($parentResponse->getContent(), true);
 
         foreach ($datasets as $idx => $dataset) {
-           
-           $policy = array();           
-           $policy = $this->dac->getDatasetPolicy($auth, $dataset['id']);
 
-           
-           
+            $policy = array();
+            $policy = $this->dac->getDatasetPolicy($auth, $dataset['id']);
+
+
+
             foreach ($policy as $key => $value) {
                 $datasets[$idx]['policy_' . $key] = $value;
             }
 
-            if ((!isset($datasets[$idx]['policy_id']) || !$datasets[$idx]['policy_id']) 
-                && isset($datasets[$idx]['properties']['policy_id']) 
+            if ((!isset($datasets[$idx]['policy_id']) || !$datasets[$idx]['policy_id'])
+                && isset($datasets[$idx]['properties']['policy_id'])
                 && $datasets[$idx]['properties']['policy_id']
             ) {
                 $datasets[$idx]['policy_id'] = $datasets[$idx]['properties']['policy_id'];
@@ -57,7 +57,7 @@ class DatasetController extends ResourceController
     {
         $parentResponse = parent::putResource($request, $auth, $study_id, $dataset_id);
         $dataset = json_decode($parentResponse->getContent(), true);
-        
+
         $policyRequest = array("status" => null);
         $policyRequest = $this->dac->getDatasetPolicy($auth, $dataset_id);
         if ($policyRequest['status'] == 'success') {
@@ -72,8 +72,8 @@ class DatasetController extends ResourceController
             }
         }
 
-        if ((!isset($dataset['policy_id']) || !$dataset['policy_id']) 
-            && isset($dataset['properties']->policy_id) 
+        if ((!isset($dataset['policy_id']) || !$dataset['policy_id'])
+            && isset($dataset['properties']->policy_id)
             && $dataset['properties']->policy_id
         ) {
             $dataset['policy_id'] = $dataset['properties']->policy_id;
@@ -104,16 +104,22 @@ class DatasetController extends ResourceController
     {
         $datasets = $this->resourceRead->listResources($auth, 'Dataset', null, 'read', 'published');
         $datasets = array_map(function ($d) {
+            $nb_runs = 0;
+            foreach($d['properties'] as $k => $v){
+                if (strpos($k,'run_public_ids') !== false){
+                    $nb_runs += count($v);
+                }
+            }
             return [
                 'public_id' => $d['properties']['public_id'],
                 'title' => $d['properties']['title'],
                 'description' => $d['properties']['description'],
                 'types' => $d['properties']['dataset_types'],
-                'nb_samples' => count($d['properties']['run_public_ids']),
+                'nb_samples' => $nb_runs,
                 'request' => isset($d['request']) ? $d['request'] : null,
             ];
         }, (array) $datasets);
-
+    
         $content = json_encode($datasets);
         return new JsonResponse($content, json: true);
     }
@@ -190,8 +196,14 @@ class DatasetController extends ResourceController
             unset($dataset['study_public_id']);
             $dataset['nb_files'] = count($dataset['files']);
             unset($dataset['files']);
-            $dataset['nb_runs'] = count($dataset['run_public_ids']);
-            unset($dataset['run_public_ids']);
+            $nb_runs = 0;
+            foreach($dataset as $k => $v){
+                if (strpos($k,'run_public_ids') !== false){
+                    $nb_runs += count($v);
+                    unset($dataset[$k]);
+                }
+            }
+            $dataset['nb_runs'] = $nb_runs;
             $dataset['nb_analyses'] = count($dataset['analysis_public_ids']);
             unset($dataset['analysis_public_ids']);
         }
