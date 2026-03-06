@@ -438,11 +438,14 @@ final class ResourceEditService
                 }
             }
         }
-		foreach($existingRelationships as $r){
-			if(!isset($r['still_exists'])){
-				$this->relationshipService->deleteRelationship($r['domain_resource_id'],$r['range_resource_id'], $userId);
-			}
-		}
+        
+        if ($resourceType['name'] !== 'Study'){
+    		foreach($existingRelationships as $r){
+    			if(!isset($r['still_exists'])){
+    				$this->relationshipService->deleteRelationship($r['domain_resource_id'],$r['range_resource_id'], $userId);
+    			}
+    		}            
+        }
 
         // Log the action
         $logUuid = Uuid::uuid4()->toString();
