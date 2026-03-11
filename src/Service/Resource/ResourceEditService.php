@@ -377,6 +377,18 @@ final class ResourceEditService
                 ]);
             }
         } else {
+            // check permissions
+            $test = $this->db->queryFirstField(
+                "SELECT resource_id FROM resource_user_view WHERE resource_id = %s AND user_id = %i AND permissions LIKE %ss",
+                $data['id'],
+                $userId,
+                'edit'
+            );
+
+            if (!$test) {
+                throw new Exception("Error: permission denied to edit resource: " . $data['public_id'], 401);
+            }
+
             $this->db->update('resource', $data, 'id = %s', $data['id']);
         }
 		
