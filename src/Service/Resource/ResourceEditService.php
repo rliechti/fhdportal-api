@@ -107,6 +107,7 @@ final class ResourceEditService
      */
     private function insertResourceFromProperties(string $studyId, array $resourceType, object $properties, int $userId, string $roleId): array
     {
+
         $data = [
             'id' => null,
             'properties' => null,
@@ -115,6 +116,7 @@ final class ResourceEditService
         ];
 
         $propertiesArray = (array)$properties;
+
         $actionTypeId = 'CRE';
         // Check if resource already exists by ID
         if (!empty($propertiesArray['id'])) {
@@ -179,7 +181,6 @@ final class ResourceEditService
                     }
                 }
             }
-
 
             $whereConditions = [];
             $queryParams = [
@@ -275,8 +276,8 @@ final class ResourceEditService
             }
         }
 
-
         foreach ($propertiesArray as $k => $v) {
+
             if (isset($schemaProperties[$k]) && $k !== 'files' && $k !== 'sdafile_public_ids' && strpos($k,'public_id') === FALSE) {
                 if (isset($schemaProperties[$k]['type']) && $schemaProperties[$k]['type'] == 'array' && gettype($v) == 'string') {
                     $dataProperties[$k] = [$v];
@@ -342,6 +343,7 @@ final class ResourceEditService
             } elseif ($k == 'id' && $this->helper->checkUuid($v)) {
                 //do nothing
             } elseif (isset($schemaProperties['extra_attributes']) && $k !=='public_id') {
+				
                 $tag = null;
                 $unit = "";
                 $value = $v;
@@ -377,18 +379,6 @@ final class ResourceEditService
                 ]);
             }
         } else {
-            // check permissions
-            $test = $this->db->queryFirstField(
-                "SELECT resource_id FROM resource_user_view WHERE resource_id = %s AND user_id = %i AND permissions LIKE %ss",
-                $data['id'],
-                $userId,
-                'edit'
-            );
-
-            if (!$test) {
-                throw new Exception("Error: permission denied to edit resource: " . $data['public_id'], 401);
-            }
-
             $this->db->update('resource', $data, 'id = %s', $data['id']);
         }
 		
@@ -449,7 +439,7 @@ final class ResourceEditService
                     }
                 }
             }
-        }
+        }    
         
         if ($resourceType['name'] !== 'Study'){
     		foreach($existingRelationships as $r){
@@ -632,8 +622,36 @@ final class ResourceEditService
                     $errorMessage = isset($errorMessages[$errorCode]) ? $errorMessages[$errorCode] : 'Unknown error during file upload.';
                     return new JsonResponse($errorMessage, 400);
                 }
-                $filename = $file->getClientOriginalName();
-                $original_name = $filename;
+                // 1. Sanitize filename - remove path traversal
+                $original_name = $file->getClientOriginalName();
+                $filename = basename($original_name);  // Remove directory paths
+                $filename = preg_replace('/[^a-zA-Z0-9._-]/', '_', $filename);  // Sanitize
+                
+                // 2. Validate file extension whitelist
+                $allowed_extensions = ['xlsx', 'xls', 'tsv', 'csv', 'txt', 'json'];
+                $extension = strtolower(pathinfo($filename, PATHINFO_EXTENSION));
+                if (!in_array($extension, $allowed_extensions)) {
+                    throw new Exception("File type not allowed: " . $extension, 400);
+                }
+
+                // 3. Validate MIME type
+                $allowed_mimes = [
+                    'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+                    'application/vnd.ms-excel',
+                    'text/plain',
+                    'text/csv',
+                    'text/tab-separated-values',
+                    'application/json'
+                ];
+                $finfo = finfo_open(FILEINFO_MIME_TYPE);
+                $mime_type = finfo_file($finfo, $file->getPathname());
+                finfo_close($finfo);
+
+                if (!in_array($mime_type, $allowed_mimes)) {
+                    throw new Exception("Invalid file type: " . $mime_type, 400);
+                }
+                
+                
                 $numbers = array();
                 $pathinfo = pathinfo($filename);
                 $basename = $pathinfo['filename'];
@@ -642,8 +660,8 @@ final class ResourceEditService
                 $fileProperties = array(
                     "name" => $filepath,
                     "original_name" => $filename,
-                    "filesize" => "",
-                    "mime_type" => "",
+                    "filesize" => filesize($file->getPathname()),
+                    "mime_type" => $mime_type,
                     "md5" => ""
                 );
                 // Handle file duplicates

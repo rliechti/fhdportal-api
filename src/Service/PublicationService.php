@@ -133,8 +133,8 @@ class PublicationService
             ];
 
             $existingId = $this->db->queryFirstField(
-                "SELECT id FROM resource WHERE resource.properties ->> 'id' = ?",
-                [$pmid]
+                "SELECT id FROM resource WHERE resource.properties ->> 'id' = %s",
+                $pmid
             );
 
             if ($existingId) {

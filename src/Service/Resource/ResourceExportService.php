@@ -57,7 +57,7 @@ final class ResourceExportService
      * @throws Exception If unauthorized or study not found.
      */
 
-    public function getRelations(string $study_id, string $dataset_id = null): array
+    public function getRelations(string $study_id, ?string $dataset_id = null): array
     {
         $relations = array();
         if (!$dataset_id) {
@@ -108,7 +108,7 @@ final class ResourceExportService
     }
 
 
-    public function downloadSubmission(Keycloak $auth, string $study_id, string $project_dir, string $dataset_id = null): string
+    public function downloadSubmission(Keycloak $auth, string $study_id, string $project_dir, ?string $dataset_id = null): string
     {
 
         if ($auth->isGuest() || !$auth->hasRole('submitter')) {

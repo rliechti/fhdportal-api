@@ -108,24 +108,58 @@ class UserKeyService
 
         // Validate public key based on key type
         if ($keyType === 'ssh') {
-            $tmpfname = tempnam(sys_get_temp_dir(), "checkKey") . ".pub";
-            file_put_contents($tmpfname, $publicKey);
-            $process = new Process(['ssh-keygen', '-l', '-f', $tmpfname]);
-            $process->run();
-            if (!$process->isSuccessful()) {
-                unlink($tmpfname);
-                return array(
-                    "status" => 400,
-                    "error" => "The provided key is not valid",
-                    "message" => "The provided key is not valid"
-                );
+            $tmpfname = tempnam(sys_get_temp_dir(), "checkKey_" . uniqid()) . ".pub";
+            $handle = fopen($tmpfname, "w");
+            fwrite($handle, $publicKey);
+            fclose($handle);
+            try {
+                $process = new Process(['ssh-keygen', '-l', '-f', $tmpfname]);
+                $process->run();
+                if (!$process->isSuccessful()) {
+                    if (file_exists($tmpfname)) {
+                        unlink($tmpfname);
+                    }
+                    return array(
+                        "status" => 400,
+                        "error" => "The provided key is not valid",
+                        "message" => "The provided key is not valid"
+                    );
+                }                
+            } finally  {
+                if (file_exists($tmpfname)) {
+                    unlink($tmpfname);
+                }
             }
         } elseif ($keyType === 'c4gh') {
-            if (strlen($publicKey) < 10) {
+            if (strlen($publicKey) < 64){
                 return array(
                     "status" => 400,
                     "error" => "The provided key is probably invalid (too short)",
                     "message" => "The provided key is probably invalid (too short)"
+                );
+            }
+            $publicKey = preg_replace("/-{2,}BEGIN CRYPT4GH PUBLIC KEY-{2,}/","",$publicKey);
+            $publicKey = preg_replace("/-{2,}END CRYPT4GH PUBLIC KEY-{2,}/","",$publicKey);
+            $publicKey = str_replace("\n","",$publicKey);
+            // Verify base64 encoding
+            if (!preg_match('/^[A-Za-z0-9+\/=]+$/', $publicKey)) {
+                return array(
+                    "status" => 400,
+                    "error" => "Error: Invalid C4GH key format",
+                    "message" => "Error: Invalid C4GH key format"
+                );
+            }
+
+            try {
+                $decoded = base64_decode($publicKey, true);
+                if ($decoded === false || strlen($decoded) !== 32) {
+                    throw new Exception("Error: Invalid C4GH key", 400);
+                }
+            } catch (\Exception $e) {
+                return array(
+                    "status" => 400,
+                    "error" => "Error: Invalid C4GH key: " . $e->getMessage(),
+                    "message" => "Error: Invalid C4GH key: " . $e->getMessage()
                 );
             }
         }
