@@ -628,7 +628,7 @@ final class ResourceEditService
                 $filename = preg_replace('/[^a-zA-Z0-9._-]/', '_', $filename);  // Sanitize
                 
                 // 2. Validate file extension whitelist
-                $allowed_extensions = ['xlsx', 'xls', 'tsv', 'csv', 'txt', 'json'];
+                $allowed_extensions = ['xlsx', 'xls', 'tsv', 'csv', 'txt', 'json', 'zip'];
                 $extension = strtolower(pathinfo($filename, PATHINFO_EXTENSION));
                 if (!in_array($extension, $allowed_extensions)) {
                     throw new Exception("File type not allowed: " . $extension, 400);
@@ -641,7 +641,8 @@ final class ResourceEditService
                     'text/plain',
                     'text/csv',
                     'text/tab-separated-values',
-                    'application/json'
+                    'application/json',
+                    'application/zip'
                 ];
                 $finfo = finfo_open(FILEINFO_MIME_TYPE);
                 $mime_type = finfo_file($finfo, $file->getPathname());
