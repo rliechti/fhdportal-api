@@ -4,6 +4,7 @@ namespace App\Service\Dac;
 
 use App\Service\Auth\Keycloak;
 use App\Service\RabbitMq\RabbitMqInterface;
+use App\Service\Utility\GeneralHelperService;
 use MeekroDB;
 use Ramsey\Uuid\Uuid;
 use Symfony\Component\Mailer\Exception\TransportExceptionInterface;
@@ -17,13 +18,15 @@ class DatasetRequestService
     private MailerInterface $mailer;
     private SerializerInterface $serializer;
     private RabbitMqInterface $rabbitmq;
+    private GeneralHelperService $helper;
 
-    public function __construct(MeekroDB $db, MailerInterface $mailer, SerializerInterface $serializer, RabbitMqInterface $rabbitmq)
+    public function __construct(MeekroDB $db, MailerInterface $mailer, SerializerInterface $serializer, RabbitMqInterface $rabbitmq, GeneralHelperService $helper)
     {
         $this->db = $db;
         $this->mailer = $mailer;
         $this->serializer = $serializer;
         $this->rabbitmq = $rabbitmq;
+        $this->helper = $helper;
     }
 
 
@@ -46,7 +49,9 @@ class DatasetRequestService
                 "exit_code" => 401
             ];
         }
-        $resource_id = $this->db->queryFirstField("SELECT id from dataset_view where id = %s and status_type_id = 'PUB' and released_date <= '" . date('Y-m-d') . "'", $form['dataset_id']);
+        $field = $this->helper->checkUuid($form['dataset_id']) ? 'id' : 'public_id';
+    
+        $resource_id = $this->db->queryFirstField("SELECT id from dataset_view where %b = %s and status_type_id = 'PUB' and released_date <= '" . date('Y-m-d') . "'", $field, $form['dataset_id']);
         if (!$resource_id) {
             return [
                 "status"    => "error",
