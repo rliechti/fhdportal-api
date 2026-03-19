@@ -1,551 +1,742 @@
 <?php
 
+/**
+ * RabbitMQ Consumer — SDA File Manager
+ *
+ * This script listens to several RabbitMQ queues and keeps the SDA
+ * (Sensitive Data Archive) file states in sync with the database.
+ *
+ * Queues consumed:
+ *  - files.inbox     : file uploaded / renamed / removed by the user
+ *  - files.verified  : file verified by the SDA pipeline
+ *  - files.completed : file published with an accession ID
+ *  - files.error     : error reported by the SDA pipeline
+ *
+ * Action codes stored in the database:
+ *  - CRE : resource created
+ *  - MOD : resource modified / renamed
+ *  - VER : verification successful
+ *  - PUB : file published
+ *  - DEL : file deleted or rejected
+ */
+
 require __DIR__ . '/include.php';
 require __DIR__ . '/keycloak.php';
+
 use Ramsey\Uuid\Uuid;
-
-function checkUuid($string){
-    return preg_match('/^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$/',$string);
-}
-
-function updateResourceStatus($user_id, $filepath, $status, $new_properties = array(), $comment = "")
-{
-    echo "[".date('Y-m-d h:i:s')."] ".$filepath." => ".$status.PHP_EOL;
-    $dbresources = DB::query("SELECT
-        resource.id,
-        resource.properties,
-        resource.properties ->> 'public_id' as public_id
-    FROM
-        resource
-        INNER JOIN resource_type ON resource.resource_type_id = resource_type.id
-        AND resource_type.\"name\" = 'SdaFile'
-        inner join resource_acl on resource.id = resource_acl.resource_id and resource_acl.user_id = %i
-    where coalesce(resource.properties->>'filepath'::text,'') = %s
-    ", $user_id, $filepath);
-    if (!$dbresources) {
-        fwrite(STDERR, "Error: file ".$filepath." is unknown".PHP_EOL);
-    }
-    foreach ($dbresources as $dbresource) {
-        $json_properties = $dbresource['properties'];
-        $updates = array("status_type_id" => $status);
-        if ($new_properties){
-            $properties = json_decode($json_properties,true);
-            foreach($new_properties as $k => $v){
-                $properties[$k] = $v;
-            }
-            $json_properties = json_encode($properties);
-            $updates["properties"] = $json_properties;
-        }
-        DB::update("resource", $updates, "id = %s", $dbresource['id']);
-        $uuid = Uuid::uuid4();
-        $log_id = $uuid->toString();
-        $log = array(
-            "id" => $log_id,
-            "resource_id" => $dbresource['id'],
-            "user_id" => $user_id,
-            "action_type_id" => $status,
-            "properties" => $json_properties
-        );
-        if ($comment) {
-            $log['comment'] = $comment;
-        }
-        DB::insert("resource_log", $log);
-    }
-}
-
-function registerErrorResource($user_id, $data){
-    if ($data['filepath']){
-        $dbresources = DB::query("SELECT
-            resource.id,
-            resource.properties,
-            resource.properties ->> 'public_id' as public_id
-        FROM
-            resource
-            INNER JOIN resource_type ON resource.resource_type_id = resource_type.id
-            AND resource_type.\"name\" = 'SdaFile'
-            inner join resource_acl on resource.id = resource_acl.resource_id and resource_acl.user_id = %i
-        where coalesce(resource.properties->>'filepath'::text,'') = %s
-        ", $user_id, $data['filepath']);
-        if ($dbresources) {
-            foreach($dbresources as $dbresource){
-                updateResourceStatus($user_id, $data['filepath'], "DEL", array(), $data['error_message']);
-            }
-        }
-        else{
-            $resourceProperties = array(
-                "filesize" => isset($data['filesize']) ? +$data['filesize'] : -1,
-                "title" => basename($data['filepath']),
-                "filepath" => $data['filepath'],
-                "file_last_modified" => +strtotime($data['timestamp']),
-                "encrypted_checksums" => array(array("type" => "sha256", "value" => $data['expected_checksum']??''))
-            );
-            $validator = new JsonSchema\Validator();
-            $schema_json = DB::queryFirstField("SELECT properties from resource_type where name = 'SdaFile'");
-            $schema = json_decode($schema_json);
-            $properties = json_decode(json_encode($resourceProperties));
-            $validator->validate($properties, $schema->data_schema);
-            if ($validator->isValid()) {
-                $ret = array('action_type_id' => null,'public_id' => null);
-                $resource = array(
-                    "id" => null,
-                    "properties" => json_encode($properties),
-                    "resource_type_id" => DB::queryFirstField("SELECT id from resource_type where name = 'SdaFile'"),
-                    "status_type_id" => DB::queryFirstField("SELECT id from status_type where name = 'rejected'")
-                );
-                $action_type_id = 'DEL';
-                $uuid = Uuid::uuid4();
-                $resource['id'] = $uuid->toString();
-                DB::insert('resource', $resource);
-                $acl = array( "resource_id" => $resource['id'], "user_id" => $user_id, "role_id" => "OWN" );
-                DB::insert('resource_acl', $acl);
-                $uuid = Uuid::uuid4();
-                $log_id = $uuid->toString();
-                $log = array(
-                    "id" => $log_id,
-                    "resource_id" => $resource['id'],
-                    "user_id" => $user_id,
-                    "action_type_id" => $action_type_id,
-                    "properties" => $resource['properties'],
-                    "comment" => $data['error_message']
-                );
-                DB::insert("resource_log", $log);
-                echo "[".date('Y-m-d h:i:s')."] ERROR: ".basename($data['filepath'])." => ".$data['error_message'].PHP_EOL;
-            }
-            else{
-                echo "[".date('Y-m-d h:i:s')."] Wrong sda-file schema => ".$data['error_message'].PHP_EOL;
-                echo "===================================================\n";
-                foreach ($validator->getErrors() as $error) {
-                    printf("[%s] %s\n", $error['property'], $error['message']);
-                }
-                echo "===================================================\n";
-            }
-        }           
-    }
-    else{
-        echo "[".date('Y-m-d h:i:s')."] Unknown error => ".$data['error_message'].PHP_EOL;
-    }
-}
-
-use PhpAmqpLib\Connection\AMQPStreamConnection;
 use PhpAmqpLib\Connection\AMQPConnectionConfig;
 use PhpAmqpLib\Connection\AMQPConnectionFactory;
 use PhpAmqpLib\Message\AMQPMessage;
 use PhpAmqpLib\Exchange\AMQPExchangeType;
 use PhpAmqpLib\Wire\AMQPTable;
-$mq_host        = $_ENV['MQ_HOST'];
-$mq_port        = $_ENV['MQ_PORT'];
-$mq_user        = $_ENV['MQ_USER'];
-$mq_pwd         = $_ENV['MQ_PWD'];
-$mq_vhost       = $_ENV['MQ_VHOST'];
-$mq_exchange    = $_ENV['MQ_EXCHANGE'];
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+/**
+ * Checks whether a string is a valid UUID (versions 1-5).
+ */
+function checkUuid(string $string): bool
+{
+    return (bool) preg_match(
+        '/^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$/',
+        $string
+    );
+}
+
+/**
+ * Generates a UUID v4 and returns it as a string.
+ */
+function newUuid(): string
+{
+    return Uuid::uuid4()->toString();
+}
+
+/**
+ * Prints a timestamped message to stdout.
+ */
+function logInfo(string $message): void
+{
+    echo '[' . date('Y-m-d H:i:s') . '] ' . $message . PHP_EOL;
+}
+
+/**
+ * Prints a timestamped error message to stderr.
+ */
+function logError(string $message): void
+{
+    fwrite(STDERR, '[' . date('Y-m-d H:i:s') . '] ERROR: ' . $message . PHP_EOL);
+}
+
+// ---------------------------------------------------------------------------
+// Database resource management
+// ---------------------------------------------------------------------------
+
+/**
+ * Resolves the internal user ID from a Keycloak email address.
+ * Creates the user row if it does not exist yet.
+ *
+ * @param  string   $email  User email address (Keycloak identifier)
+ * @return int|null         Internal user ID, or null if not found
+ */
+function resolveUserId(string $email): ?int
+{
+    $users = getKeyCloakUsers('', 'email=' . $email);
+    $user  = array_shift($users);
+
+    $userId = null;
+    if (!empty($user['username'])) {
+        $userId = DB::queryFirstField(
+            'SELECT id FROM "user" WHERE external_id = %s',
+            $user['username']
+        );
+    }
+
+    if (!$userId) {
+        DB::insert('user', ['external_id' => $email]);
+        $userId = DB::insertId();
+    }
+
+    return $userId ?: null;
+}
+
+/**
+ * Updates the status of an SdaFile resource identified by its filepath,
+ * optionally merges new properties into the existing JSON blob, and writes
+ * an action log entry.
+ *
+ * @param int    $userId         Internal ID of the owning user
+ * @param string $filepath       File path inside the SDA
+ * @param string $status         New status / action code (e.g. VER, DEL, PUB)
+ * @param array  $newProperties  Properties to merge into the JSON blob (optional)
+ * @param string $comment        Free-text comment to store in the log (optional)
+ */
+function updateResourceStatus(
+    int    $userId,
+    string $filepath,
+    string $status,
+    array  $newProperties = [],
+    string $comment = ''
+): void {
+    logInfo($filepath . ' => ' . $status);
+
+    $resources = DB::query(
+        "SELECT
+            resource.id,
+            resource.properties,
+            resource.properties ->> 'public_id' AS public_id
+        FROM resource
+        INNER JOIN resource_type
+            ON resource.resource_type_id = resource_type.id
+            AND resource_type.\"name\" = 'SdaFile'
+        INNER JOIN resource_acl
+            ON resource.id = resource_acl.resource_id
+            AND resource_acl.user_id = %i
+        WHERE COALESCE(resource.properties->>'filepath'::text, '') = %s",
+        $userId,
+        $filepath
+    );
+
+    if (!$resources) {
+        logError('File ' . $filepath . ' is unknown');
+        return;
+    }
+
+    foreach ($resources as $resource) {
+        $jsonProperties = $resource['properties'];
+
+        // Merge new properties into the existing JSON blob if provided
+        if ($newProperties) {
+            $props = json_decode($jsonProperties, true);
+            foreach ($newProperties as $key => $value) {
+                $props[$key] = $value;
+            }
+            $jsonProperties = json_encode($props);
+        }
+
+        DB::update('resource', ['status_type_id' => $status], 'id = %s', $resource['id']);
+
+        if ($newProperties) {
+            DB::update('resource', ['properties' => $jsonProperties], 'id = %s', $resource['id']);
+        }
+
+        // Write the action log entry
+        $log = [
+            'id'             => newUuid(),
+            'resource_id'    => $resource['id'],
+            'user_id'        => $userId,
+            'action_type_id' => $status,
+            'properties'     => $jsonProperties,
+        ];
+        if ($comment) {
+            $log['comment'] = $comment;
+        }
+        DB::insert('resource_log', $log);
+    }
+}
+
+/**
+ * Registers a resource that failed during the SDA pipeline.
+ *
+ * If the file is already known in the database its status is set to DEL with
+ * the error message stored as a comment. Otherwise a new resource is created
+ * directly in the "rejected" status.
+ *
+ * @param int   $userId  Internal user ID
+ * @param array $data    Error event payload
+ */
+function registerErrorResource(int $userId, array $data): void
+{
+    if (empty($data['filepath'])) {
+        logInfo('Unknown error => ' . ($data['error_message'] ?? '(no message)'));
+        return;
+    }
+
+    $existingResources = DB::query(
+        "SELECT resource.id
+        FROM resource
+        INNER JOIN resource_type
+            ON resource.resource_type_id = resource_type.id
+            AND resource_type.\"name\" = 'SdaFile'
+        INNER JOIN resource_acl
+            ON resource.id = resource_acl.resource_id
+            AND resource_acl.user_id = %i
+        WHERE COALESCE(resource.properties->>'filepath'::text, '') = %s",
+        $userId,
+        $data['filepath']
+    );
+
+    if ($existingResources) {
+        // Resource already exists: mark it as deleted / rejected
+        updateResourceStatus($userId, $data['filepath'], 'DEL', [], $data['error_message']);
+        return;
+    }
+
+    // Resource is unknown: create it directly in the "rejected" status
+    $resourceProperties = [
+        'filesize'            => isset($data['filesize']) ? (int) $data['filesize'] : -1,
+        'title'               => basename($data['filepath']),
+        'filepath'            => $data['filepath'],
+        'file_last_modified'  => (int) strtotime($data['timestamp'] ?? ''),
+        'encrypted_checksums' => [
+            ['type' => 'sha256', 'value' => $data['expected_checksum'] ?? ''],
+        ],
+    ];
+
+    // Validate against the SdaFile JSON schema before inserting
+    $validator  = new JsonSchema\Validator();
+    $schemaJson = DB::queryFirstField("SELECT properties FROM resource_type WHERE name = 'SdaFile'");
+    $schema     = json_decode($schemaJson);
+    $properties = json_decode(json_encode($resourceProperties));
+    $validator->validate($properties, $schema->data_schema);
+
+    if (!$validator->isValid()) {
+        logInfo('Wrong sda-file schema => ' . $data['error_message']);
+        echo "===================================================\n";
+        foreach ($validator->getErrors() as $error) {
+            printf("[%s] %s\n", $error['property'], $error['message']);
+        }
+        echo "===================================================\n";
+        return;
+    }
+
+    $resourceId       = newUuid();
+    $jsonProperties   = json_encode($properties);
+    $rejectedStatusId = DB::queryFirstField("SELECT id FROM status_type WHERE name = 'rejected'");
+    $resourceTypeId   = DB::queryFirstField("SELECT id FROM resource_type WHERE name = 'SdaFile'");
+
+    DB::insert('resource', [
+        'id'               => $resourceId,
+        'properties'       => $jsonProperties,
+        'resource_type_id' => $resourceTypeId,
+        'status_type_id'   => $rejectedStatusId,
+    ]);
+
+    DB::insert('resource_acl', [
+        'resource_id' => $resourceId,
+        'user_id'     => $userId,
+        'role_id'     => 'OWN',
+    ]);
+
+    DB::insert('resource_log', [
+        'id'             => newUuid(),
+        'resource_id'    => $resourceId,
+        'user_id'        => $userId,
+        'action_type_id' => 'DEL',
+        'properties'     => $jsonProperties,
+        'comment'        => $data['error_message'],
+    ]);
+
+    logInfo('ERROR: ' . basename($data['filepath']) . ' => ' . $data['error_message']);
+}
+
+// ---------------------------------------------------------------------------
+// RabbitMQ connection
+// ---------------------------------------------------------------------------
+
 $config = new AMQPConnectionConfig();
-$config->setHost($mq_host);
-$config->setPort($mq_port);
-$config->setUser($mq_user);
-$config->setPassword($mq_pwd);
-$config->setVhost($mq_vhost);
-$isSecure = $mq_host != 'localhost';
+$config->setHost($_ENV['MQ_HOST']);
+$config->setPort($_ENV['MQ_PORT']);
+$config->setUser($_ENV['MQ_USER']);
+$config->setPassword($_ENV['MQ_PWD']);
+$config->setVhost($_ENV['MQ_VHOST']);
+
+// Enable TLS for any host other than localhost
+$isSecure = ($_ENV['MQ_HOST'] !== 'localhost');
 $config->setIsSecure($isSecure);
 $config->setSslVerify(false);
-$factory = new AMQPConnectionFactory();
-$connection = $factory->create($config);
-$channel = $connection->channel();
+
+$connection = (new AMQPConnectionFactory())->create($config);
+$channel    = $connection->channel();
+
+$mq_exchange = $_ENV['MQ_EXCHANGE'];
 
 echo " [*] Waiting for messages. To exit press CTRL+C\n";
 
-$callbacks = array();
+// ---------------------------------------------------------------------------
+// Queue callbacks
+// ---------------------------------------------------------------------------
 
-// RUN ON SDA SIDE //
+$callbacks = [];
 
-// $callbacks['ingest'] = function ($msg) {
-//     $data = json_decode($msg->body, true);
-//     print_r($data);
-// };
+/**
+ * Queue: files.inbox
+ *
+ * Handles operations triggered by the user from the SDA inbox:
+ *  - upload : registers the file in the database and triggers ingestion
+ *  - rename : updates the filepath in the database
+ *  - remove : marks the file as deleted
+ */
+$callbacks['inbox'] = function (AMQPMessage $msg) use ($channel, $mq_exchange): void {
+    $data          = json_decode($msg->body, true);
+    $correlationId = $msg->get('correlation_id');
+    $userId        = resolveUserId($data['user']);
 
-$callbacks['inbox'] = function ($msg) {
-    global $channel;
-    global $mq_exchange;
-    $correlation_id = $msg->get("correlation_id");
-    $data = json_decode($msg->body, true);
-    $users = getKeyCloakUsers('', 'email='.$data['user']);
-    $user = array_shift($users);
-    $user_id = null;
-    // DB::debugMode(true);
-    if ($user['username']) {
-        $user_id = DB::queryFirstField("SELECT id from \"user\" where external_id = %s", $user['username']);
+    if (!$userId) {
+        logError('Cannot resolve user: ' . $data['user']);
+        $msg->ack();
+        return;
     }
-    if (!$user_id) {
-        DB::insert("user", array("external_id" => $data['user']));
-        $user_id = DB::insertId();
-    }
-    $role_id = DB::queryFirstField("SELECT id from \"role\" where name = 'owner'");
-    if ($data['operation'] == 'upload') {
-        $resourceProperties = array(
-            "filesize" => isset($data['filesize']) ? +$data['filesize'] : -1,
-            "title" => basename($data['filepath']),
-            "filepath" => $data['filepath'],
-            "file_last_modified" => +$data['file_last_modified'],
-            "encrypted_checksums" => $data['encrypted_checksums']
-        );
-        $validator = new JsonSchema\Validator();
-        $schema_json = DB::queryFirstField("SELECT properties from resource_type where name = 'SdaFile'");
-        $schema = json_decode($schema_json);
-        $properties = json_decode(json_encode($resourceProperties));
-        $validator->validate($properties, $schema->data_schema);
-        if ($validator->isValid()) {
-            $ret = array('action_type_id' => null,'public_id' => null);
-            $resource = array(
-                "id" => null,
-                "properties" => json_encode($properties),
-                "resource_type_id" => DB::queryFirstField("SELECT id from resource_type where name = 'SdaFile'"),
-                "status_type_id" => DB::queryFirstField("SELECT id from status_type where name = 'draft'")
-            );
-            $action_type_id = 'CRE';
-            $checksums = array();
-            foreach ($data['encrypted_checksums'] as $chs) {
-                if ($chs['value']) {
-                    $checksums[] = $chs['value'];
+
+    switch ($data['operation']) {
+
+        // -------------------------------------------------------------------
+        case 'upload':
+            $resourceProperties = [
+                'filesize'            => isset($data['filesize']) ? (int) $data['filesize'] : -1,
+                'title'               => basename($data['filepath']),
+                'filepath'            => $data['filepath'],
+                'file_last_modified'  => (int) $data['file_last_modified'],
+                'encrypted_checksums' => $data['encrypted_checksums'],
+            ];
+
+            // Validate the payload against the SdaFile JSON schema
+            $validator  = new JsonSchema\Validator();
+            $schemaJson = DB::queryFirstField("SELECT properties FROM resource_type WHERE name = 'SdaFile'");
+            $schema     = json_decode($schemaJson);
+            $properties = json_decode(json_encode($resourceProperties));
+            $validator->validate($properties, $schema->data_schema);
+
+            if (!$validator->isValid()) {
+                $errors = '';
+                foreach ($validator->getErrors() as $error) {
+                    $errors .= '[' . $error['property'] . ']: ' . $error['message'] . '; ';
+                    print("\t" . $error['property'] . "\t" . $error['message']);
                 }
+                logError(rtrim($errors, '; '));
+                break;
             }
-            $dbresource = null;
-            if ($checksums !== []) {
-                $dbresource = DB::queryFirstRow("SELECT
-                    resource.id,
-                    coalesce(resource.properties->>'filepath'::text,'') as filepath,
-                    resource.properties ->> 'public_id' as public_id
-                FROM
-                    resource
-                    INNER JOIN resource_type ON resource.resource_type_id = resource_type.id
-                    AND resource_type.\"name\" = 'SdaFile'
-                    inner join resource_acl on resource.id = resource_acl.resource_id and resource_acl.user_id = %i
-                where coalesce(resource.properties->'encrypted_checksums'->>'value'::text,'') in %ls
-                ", $user_id, $checksums);
-            }
-            if ($dbresource && $dbresource['filepath'] == $data['filepath']) {
-                fwrite(STDERR, "Already exists".PHP_EOL);
-                return;
-            } elseif ($dbresource) { //UPDATE (RENAME)
-                // TODO RENAME
-                $resource['id'] = $dbresource['id'];
-                $properties->public_id = $dbresource['public_id'];
-                $resource['properties'] = json_encode($properties);
-                $action_type_id = 'MOD';
-            }
-            if (!$resource['id']) {
-                $uuid = Uuid::uuid4();
-                $resource['id'] = $uuid->toString();
-                DB::insert('resource', $resource);
-                if ($role_id) {
-                    $acl = array( "resource_id" => $resource['id'], "user_id" => $user_id, "role_id" => $role_id );
-                    DB::insert('resource_acl', $acl);
-                }
-            } else {
-                DB::update('resource', $resource, "id = %s", $resource['id']);
-            }
-            $uuid = Uuid::uuid4();
-            $log_id = $uuid->toString();
-            $log = array(
-                "id" => $log_id,
-                "resource_id" => $resource['id'],
-                "user_id" => $user_id,
-                "action_type_id" => $action_type_id,
-                "properties" => $resource['properties']
+
+            // Look for a duplicate by checksum (identical re-upload or rename)
+            $checksums = array_filter(
+                array_column($data['encrypted_checksums'], 'value')
             );
-            DB::insert("resource_log", $log);
-            DB::delete("rmq_correlation","correlation_id = %s",$correlation_id);
-            DB::insert("rmq_correlation",array(
-                "correlation_id" => $correlation_id,
-                "resource_id" => $resource['id']
-            ));
-            // echo "START INGEST".PHP_EOL;
-            
-            //START INGEST PROCESS //
-            $ingest_msg = array(
-                   "type" => "ingest",
-                   "user" => $data['user'],
-                   "filepath" => $properties->filepath,
-                    "encrypted_checksums" => $properties->encrypted_checksums
-            );            
-            // fwrite(STDOUT,json_encode($ingest_msg).PHP_EOL);
-            $ingest_msg = new AMQPMessage(
-                json_encode($ingest_msg),
-                array(
-                    "correlation_id" => $correlation_id,
-                    'delivery_mode' => AMQPMessage::DELIVERY_MODE_PERSISTENT
-                )
-            );
-            $channel->basic_publish($ingest_msg, $mq_exchange ,'ingest');
-            
-            // fwrite(STDOUT,"SENT to INGEST QUEUE".PHP_EOL);
-            
-        } else {
-            $content = '';
-            print "\tJSON does not validate. Violations:\t";
-            foreach ($validator->getErrors() as $error) {
-                $content .= "[".$error['property']."]:". $error['message']."; ";
-                print("\t". $error['property']."\t". $error['message']);
-            }
-            fwrite(STDERR, substr($content, 0, -2).PHP_EOL);
-        }
-    } elseif ($data['operation'] == 'rename') {
-        if (!isset($data['oldpath']) || !$data['oldpath']) {
-            // throw new Exception("Error. Cannot rename file with no name (oldpath)", 1);
-            fwrite(STDERR, "Cannot rename file with no name (oldpath)".PHP_EOL);
-        } elseif (!isset($data['filepath']) || !$data['filepath']) {
-            fwrite(STDERR, "Cannot rename file: no new filepath provided".PHP_EOL);
-        } else {
-            $dbresource = DB::queryFirstRow("SELECT
-                resource.id,
-                resource.properties,
-                resource.properties ->> 'public_id' as public_id
-            FROM
-                resource
-                INNER JOIN resource_type ON resource.resource_type_id = resource_type.id
-                AND resource_type.\"name\" = 'SdaFile'
-                inner join resource_acl on resource.id = resource_acl.resource_id and resource_acl.user_id = %i
-            where coalesce(resource.properties->>'filepath'::text,'') = %s
-            ", $user_id, $data['oldpath']);
-            if (!$dbresource) {
-                fwrite(STDERR, "Error: resource is unknown".PHP_EOL);
-            } else {
-                $properties = json_decode($dbresource['properties'], true);
-                $properties['filepath'] = $data['filepath'];
-                DB::query("UPDATE resource set properties = properties::jsonb || '{\"filepath\":\"".$data['filepath']."\"}' where id = %s", $dbresource['id']);
-                $uuid = Uuid::uuid4();
-                $log_id = $uuid->toString();
-                $log = array(
-                    "id" => $log_id,
-                    "resource_id" => $dbresource['id'],
-                    "user_id" => $user_id,
-                    "action_type_id" => "MOD",
-                    "properties" => json_encode($properties)
+
+            $existingResource = null;
+            if ($checksums) {
+                $existingResource = DB::queryFirstRow(
+                    "SELECT
+                        resource.id,
+                        COALESCE(resource.properties->>'filepath'::text, '') AS filepath,
+                        resource.properties ->> 'public_id' AS public_id
+                    FROM resource
+                    INNER JOIN resource_type
+                        ON resource.resource_type_id = resource_type.id
+                        AND resource_type.\"name\" = 'SdaFile'
+                    INNER JOIN resource_acl
+                        ON resource.id = resource_acl.resource_id
+                        AND resource_acl.user_id = %i
+                    WHERE COALESCE(resource.properties->'encrypted_checksums'->>'value'::text, '') IN %ls",
+                    $userId,
+                    array_values($checksums)
                 );
-                DB::insert("resource_log", $log);
             }
-        }
-    } elseif ($data['operation'] == 'remove') {
-        if (!isset($data['filepath']) || !$data['filepath']) {
-            fwrite(STDERR, "Cannot remove file: no new filepath provided".PHP_EOL);
-        } else {
-            echo "[".date('Y-m-d h:i:s')."] REMOVE ".$data['filepath'].PHP_EOL;
-            updateResourceStatus($user_id, $data['filepath'], "DEL", array(), "deleted by user");
-        }
-    }
-    $msg->ack();
-};
 
-$callbacks['error'] = function ($msg) {
-    $data = json_decode($msg->body, true);
-    $correlation_id = $msg->get("correlation_id");
-    if ($correlation_id && checkUuid($correlation_id)){
-        $dbresource = DB::queryFirstRow("SELECT resource.id, resource.properties from rmq_correlation inner join resource on rmq_correlation.resource_id = resource.id where correlation_id = %s",$correlation_id);
-        if ($dbresource){
-            DB::update("resource", array("status_type_id" => "DEL"), "id = %s", $dbresource['id']);
-            $uuid = Uuid::uuid4();
-            $log_id = $uuid->toString();
-            $log = array(
-                "id" => $log_id,
-                "resource_id" => $dbresource['id'],
-                "user_id" => NULL,
-                "action_type_id" => "DEL",
-                "properties" => $dbresource['properties']
+            if ($existingResource && $existingResource['filepath'] === $data['filepath']) {
+                // Same checksum and same path: already exists, nothing to do
+                logError('Already exists');
+                break;
+            }
+
+            $actionTypeId = 'CRE';
+            $resourceId   = null;
+
+            if ($existingResource) {
+                // Same checksum but different path: treat as a rename
+                $resourceId            = $existingResource['id'];
+                $properties->public_id = $existingResource['public_id'];
+                $actionTypeId          = 'MOD';
+            }
+
+            $jsonProperties = json_encode($properties);
+            $resourceTypeId = DB::queryFirstField("SELECT id FROM resource_type WHERE name = 'SdaFile'");
+            $draftStatusId  = DB::queryFirstField("SELECT id FROM status_type WHERE name = 'draft'");
+
+            $resourceRow = [
+                'id'               => $resourceId,
+                'properties'       => $jsonProperties,
+                'resource_type_id' => $resourceTypeId,
+                'status_type_id'   => $draftStatusId,
+            ];
+
+            if (!$resourceId) {
+                // Brand-new resource: insert it and assign the owner ACL
+                $resourceRow['id'] = newUuid();
+                DB::insert('resource', $resourceRow);
+
+                $roleId = DB::queryFirstField("SELECT id FROM \"role\" WHERE name = 'owner'");
+                if ($roleId) {
+                    DB::insert('resource_acl', [
+                        'resource_id' => $resourceRow['id'],
+                        'user_id'     => $userId,
+                        'role_id'     => $roleId,
+                    ]);
+                }
+            } else {
+                // Existing resource (rename): update it in place
+                DB::update('resource', $resourceRow, 'id = %s', $resourceId);
+            }
+
+            DB::insert('resource_log', [
+                'id'             => newUuid(),
+                'resource_id'    => $resourceRow['id'],
+                'user_id'        => $userId,
+                'action_type_id' => $actionTypeId,
+                'properties'     => $jsonProperties,
+            ]);
+
+            // Store the correlation so we can match the pipeline response later
+            DB::delete('rmq_correlation', 'correlation_id = %s', $correlationId);
+            DB::insert('rmq_correlation', [
+                'correlation_id' => $correlationId,
+                'resource_id'    => $resourceRow['id'],
+            ]);
+
+            // Forward the ingestion request to the SDA pipeline
+            $ingestPayload = json_encode([
+                'type'                => 'ingest',
+                'user'                => $data['user'],
+                'filepath'            => $properties->filepath,
+                'encrypted_checksums' => $properties->encrypted_checksums,
+            ]);
+
+            $channel->basic_publish(
+                new AMQPMessage($ingestPayload, [
+                    'correlation_id' => $correlationId,
+                    'delivery_mode'  => AMQPMessage::DELIVERY_MODE_PERSISTENT,
+                ]),
+                $mq_exchange,
+                'ingest'
             );
-            DB::insert("resource_log", $log);            
-        }
-        elseif (isset($data['error_message'])){
-            $user_id = null;
-            if (isset($data['user'])){
-                $users = getKeyCloakUsers('', 'email='.$data['user']);
-                if (!$users || !count($users)) {
-                    throw new Exception("Error: unknown user: ".$data['user'], 1);
-                }
-                $user = array_shift($users);        
-                if ($user['username']) {
-                    $user_id = DB::queryFirstField("SELECT id from \"user\" where external_id = %s", $user['username']);
-                }
+            break;
+
+        // -------------------------------------------------------------------
+        case 'rename':
+            if (empty($data['oldpath'])) {
+                logError('Cannot rename file with no name (oldpath)');
+                break;
             }
-            if ($user_id){
-                registerErrorResource($user_id,$data);    
+            if (empty($data['filepath'])) {
+                logError('Cannot rename file: no new filepath provided');
+                break;
             }
-        }
+
+            $resource = DB::queryFirstRow(
+                "SELECT resource.id, resource.properties, resource.properties ->> 'public_id' AS public_id
+                FROM resource
+                INNER JOIN resource_type
+                    ON resource.resource_type_id = resource_type.id
+                    AND resource_type.\"name\" = 'SdaFile'
+                INNER JOIN resource_acl
+                    ON resource.id = resource_acl.resource_id
+                    AND resource_acl.user_id = %i
+                WHERE COALESCE(resource.properties->>'filepath'::text, '') = %s",
+                $userId,
+                $data['oldpath']
+            );
+
+            if (!$resource) {
+                logError('Resource is unknown for rename: ' . $data['oldpath']);
+                break;
+            }
+
+            // Patch only the filepath field in the JSONB column
+            DB::query(
+                "UPDATE resource
+                SET properties = properties::jsonb || '{\"filepath\":\"" . $data['filepath'] . "\"}'
+                WHERE id = %s",
+                $resource['id']
+            );
+
+            $props             = json_decode($resource['properties'], true);
+            $props['filepath'] = $data['filepath'];
+
+            DB::insert('resource_log', [
+                'id'             => newUuid(),
+                'resource_id'    => $resource['id'],
+                'user_id'        => $userId,
+                'action_type_id' => 'MOD',
+                'properties'     => json_encode($props),
+            ]);
+            break;
+
+        // -------------------------------------------------------------------
+        case 'remove':
+            if (empty($data['filepath'])) {
+                logError('Cannot remove file: no filepath provided');
+                break;
+            }
+            logInfo('REMOVE ' . $data['filepath']);
+            updateResourceStatus($userId, $data['filepath'], 'DEL', [], 'deleted by user');
+            break;
+
+        default:
+            logError('Unknown operation: ' . ($data['operation'] ?? '(none)'));
     }
-    else if (isset($data['filepath']) && $data['filepath']){
-        $user_id = null;
-        if (isset($data['user'])){
-            $users = getKeyCloakUsers('', 'email='.$data['user']);
-            if (!$users || !count($users)) {
-                throw new Exception("Error: unknown user: ".$data['user'], 1);
-            }
-            $user = array_shift($users);        
-            if ($user['username']) {
-                $user_id = DB::queryFirstField("SELECT id from \"user\" where external_id = %s", $user['username']);
-            }
-        }
-        echo "[".date('Y-m-d h:i:s')."] ERROR:  ".$data['filepath'].PHP_EOL;
-        if (isset($data['reason'])){
-            updateResourceStatus($user_id, $data['filepath'], "DEL", array(), $data['reason']);            
-        }
-        elseif (isset($data['error_message'])){
-            registerErrorResource($user_id,$data);
-        }
-        
-    }
+
     $msg->ack();
-	
 };
 
-$callbacks['verified'] = function ($msg) {
-    global $channel;
-    global $mq_exchange;
-    $correlation_id = $msg->get("correlation_id");
+/**
+ * Queue: files.error
+ *
+ * Handles errors reported by the SDA pipeline. Two cases:
+ *  1. The correlation ID is known: the resource is found directly and rejected.
+ *  2. No valid correlation ID: fall back to filepath-based lookup.
+ */
+$callbacks['error'] = function (AMQPMessage $msg): void {
+    $data          = json_decode($msg->body, true);
+    $correlationId = $msg->get('correlation_id');
+
+    if ($correlationId && checkUuid($correlationId)) {
+        // Try to resolve the resource via the correlation table
+        $resource = DB::queryFirstRow(
+            'SELECT resource.id, resource.properties
+            FROM rmq_correlation
+            INNER JOIN resource ON rmq_correlation.resource_id = resource.id
+            WHERE correlation_id = %s',
+            $correlationId
+        );
+
+        if ($resource) {
+            // Resource found by correlation: reject it directly
+            DB::update('resource', ['status_type_id' => 'DEL'], 'id = %s', $resource['id']);
+            DB::insert('resource_log', [
+                'id'             => newUuid(),
+                'resource_id'    => $resource['id'],
+                'user_id'        => null,
+                'action_type_id' => 'DEL',
+                'properties'     => $resource['properties'],
+            ]);
+        } elseif (!empty($data['error_message'])) {
+            // Unknown correlation: fall back to user + filepath
+            $userId = resolveUserIdSafe($data);
+            if ($userId) {
+                registerErrorResource($userId, $data);
+            }
+        }
+    } elseif (!empty($data['filepath'])) {
+        // No valid correlation ID: handle by filepath
+        $userId = resolveUserIdSafe($data);
+        logInfo('ERROR: ' . $data['filepath']);
+
+        if (!empty($data['reason'])) {
+            updateResourceStatus($userId, $data['filepath'], 'DEL', [], $data['reason']);
+        } elseif (!empty($data['error_message'])) {
+            registerErrorResource($userId, $data);
+        }
+    }
+
+    $msg->ack();
+};
+
+/**
+ * Queue: files.verified
+ *
+ * The SDA pipeline successfully verified and decrypted the file.
+ * Updates the status to VER and stores the decrypted checksums.
+ *
+ * Note: sending the accession message is disabled here; it is handled
+ * by the dataset submission flow instead.
+ */
+$callbacks['verified'] = function (AMQPMessage $msg) use ($channel, $mq_exchange): void {
+    $data          = json_decode($msg->body, true);
+    $correlationId = $msg->get('correlation_id');
+
+    $userId = resolveUserId($data['user']);
+    if (!$userId) {
+        throw new \Exception('Error: unknown user: ' . $data['user']);
+    }
+
+    // Match on both filepath AND correlation_id to avoid ambiguity
+    // when the same file is uploaded more than once
+    $resourceId = DB::queryFirstField(
+        "SELECT resource.id
+        FROM resource
+        INNER JOIN rmq_correlation ON resource.id = rmq_correlation.resource_id
+        WHERE resource.properties->>'filepath'::text = %s
+          AND rmq_correlation.correlation_id::text = %s",
+        $data['filepath'],
+        $correlationId
+    );
+
+    if (!$resourceId) {
+        logInfo('Error: correlation_id ' . $correlationId . ' and filepath ' . $data['filepath'] . ' do not match');
+        $msg->ack();
+        return;
+    }
+
+    updateResourceStatus($userId, $data['filepath'], 'VER', [
+        'decrypted_checksums' => $data['decrypted_checksums'],
+    ]);
+
+    $msg->ack();
+};
+
+/**
+ * Queue: files.completed
+ *
+ * The file has been published with an accession ID (e.g. EGAF...).
+ * Updates the status to PUB after verifying that filepath and public_id match.
+ */
+$callbacks['completed'] = function (AMQPMessage $msg): void {
     $data = json_decode($msg->body, true);
-    $users = getKeyCloakUsers('', 'email='.$data['user']);
-    if (!$users || !count($users)) {
-        throw new Exception("Error: unknown user: ".$data['user'], 1);
-    }
-    $user = array_shift($users);
-    $user_id = null;
-    // DB::debugMode(true);
-    if ($user['username']) {
-        $user_id = DB::queryFirstField("SELECT id from \"user\" where external_id = %s", $user['username']);
-    }
-    if (!$user_id) {
-        DB::insert("user", array("external_id" => $data['user']));
-        $user_id = DB::insertId();
-    }
-    $resource_id = DB::queryFirstField("SELECT resource.id from resource inner join rmq_correlation on resource.id = rmq_correlation.resource_id where resource.properties->>'filepath'::text = %s and rmq_correlation.correlation_id::text = %s;",$data['filepath'],$correlation_id);
-    if ($resource_id){
-        $accession_id = DB::queryFirstField("SELECT public_id from sdafile_view where id = %s",$resource_id);
-        // HACK TO REMOVE INSTANCE PREFIX FROM EGA ID //
-        // TODO REPLACE BY .env constant
-        // $accession_id = str_replace("CHFEGAF","EGAF",$accession_id);
-        
-        updateResourceStatus($user_id, $data['filepath'], 'VER', array("decrypted_checksums" => $data['decrypted_checksums']));        
 
-
-        //START ACCESSION PROCESS => MOVED TO DATASET SUBMISSION //
-        // $accession_msg = array(
-        //        "type" => "accession",
-        //        "user" => $data['user'],
-        //        "filepath" => $data['filepath'],
-        //        "accession_id" => $accession_id,
-        //        "decrypted_checksums" => $data['decrypted_checksums']
-        // );
-        // // fwrite(STDOUT,json_encode($accession_msg).PHP_EOL);
-        // $accession_msg = new AMQPMessage(
-        //     json_encode($accession_msg),
-        //     array(
-        //         "correlation_id" => $correlation_id,
-        //         'delivery_mode' => AMQPMessage::DELIVERY_MODE_PERSISTENT
-        //     )
-        // );
-        // $channel->basic_publish($accession_msg, $mq_exchange ,'accession');
-        // fwrite(STDOUT,"SENT to ACCESSION QUEUE".PHP_EOL);
-        
+    $userId = resolveUserId($data['user']);
+    if (!$userId) {
+        throw new \Exception('Error: unknown user: ' . $data['user']);
     }
-    else{
-        echo "[".date('Y-m-d h:i:s')."] Error: correlation_id: ".$correlation_id." and filepath: ".$data['filepath']." do not match";
+
+    // Ensure filepath and accession ID both point to the same resource
+    $resource = DB::queryFirstRow(
+        "SELECT resource.id
+        FROM resource
+        INNER JOIN resource_type
+            ON resource.resource_type_id = resource_type.id
+            AND resource_type.\"name\" = 'SdaFile'
+        INNER JOIN resource_acl
+            ON resource.id = resource_acl.resource_id
+            AND resource_acl.user_id = %i
+        WHERE COALESCE(resource.properties->>'filepath'::text, '') = %s
+          AND resource.properties ->> 'public_id' LIKE %ss",
+        $userId,
+        $data['filepath'],
+        $data['accession_id']
+    );
+
+    if ($resource) {
+        updateResourceStatus($userId, $data['filepath'], 'PUB');
+    } else {
+        logInfo('ERROR: ' . $data['filepath'] . " doesn't match with public_id " . $data['accession_id']);
     }
 
     $msg->ack();
 };
 
-$callbacks['completed'] = function ($msg) {
-    $data = json_decode($msg->body, true);
-    $users = getKeyCloakUsers('', 'email='.$data['user']);
-    if (!$users || !count($users)) {
-        throw new Exception("Error: unknown user: ".$data['user'], 1);
-    }
-    $user = array_shift($users);
-    $user_id = null;
-    // DB::debugMode(true);
-    if ($user['username']) {
-        $user_id = DB::queryFirstField("SELECT id from \"user\" where external_id = %s", $user['username']);
-    }
-    if (!$user_id) {
-        DB::insert("user", array("external_id" => $data['user']));
-        $user_id = DB::insertId();
-    }
-    $data['user_id'] = $user_id;
-    $dbresource = DB::queryFirstRow("SELECT
-        resource.id,
-        resource.properties,
-        resource.properties ->> 'public_id' as public_id
-    FROM
-        resource
-        INNER JOIN resource_type ON resource.resource_type_id = resource_type.id
-        AND resource_type.\"name\" = 'SdaFile'
-        inner join resource_acl on resource.id = resource_acl.resource_id and resource_acl.user_id = %i_user_id
-    where coalesce(resource.properties->>'filepath'::text,'') = %s_filepath
-    and resource.properties ->> 'public_id' like %ss_accession_id
-    ", $data);
-    if ($dbresource){
-        updateResourceStatus($user_id, $data['filepath'], 'PUB');
-    }
-    else{
-        echo "[".date('Y-m-d h:i:s')."] ERROR: ".$data['filepath']." doesn't match with public_id ".$data['accession_id'].PHP_EOL;
-    }
-    $msg->ack();
-};
+// ---------------------------------------------------------------------------
+// Internal helper: safe user resolution (used in the error handler)
+// ---------------------------------------------------------------------------
 
+/**
+ * Resolves a user ID from $data['user'] without throwing an exception.
+ * Used in the error handler where the user field may be absent.
+ *
+ * @param array $data  Message payload (should contain 'user' if available)
+ * @return int|null
+ */
+function resolveUserIdSafe(array $data): ?int
+{
+    if (empty($data['user'])) {
+        return null;
+    }
+
+    $users = getKeyCloakUsers('', 'email=' . $data['user']);
+    if (!$users || !count($users)) {
+        throw new \Exception('Error: unknown user: ' . $data['user']);
+    }
+
+    $user = array_shift($users);
+    if (empty($user['username'])) {
+        return null;
+    }
+
+    return DB::queryFirstField(
+        'SELECT id FROM "user" WHERE external_id = %s',
+        $user['username']
+    ) ?: null;
+}
+
+// ---------------------------------------------------------------------------
+// Exchange and queue declaration
+// ---------------------------------------------------------------------------
 
 /*
-$exchange : string
-$type : string
-$passive : bool = false
-$durable : bool = false
-$auto_delete : bool = true
-$internal : bool = false
-$nowait : bool = false
-$arguments : AMQPTable|array<string|int, mixed> = array()
-$ticket : int|null = null
-*/
-
-$channel->exchange_declare($mq_exchange, AMQPExchangeType::TOPIC, false, true, false, false, false, new AMQPTable(array("alternate-exchange" => "localega.dead")));
-$routing_keys = array(
-    "files.completed" => "completed",
-    "files.error" => "error",
-    "files.inbox" => "inbox",
-    "files.verified" => "verified"
+ * TOPIC exchange with a dead-letter exchange as fallback.
+ * Unrouted or expired messages are forwarded to "localega.dead".
+ */
+$channel->exchange_declare(
+    $mq_exchange,
+    AMQPExchangeType::TOPIC,
+    false, // passive
+    true,  // durable
+    false, // auto-delete
+    false, // internal
+    false, // no-wait
+    new AMQPTable(['alternate-exchange' => 'localega.dead'])
 );
-foreach ($routing_keys as $routing_key => $queue) {
-    /*
-    $queue : string = ''
-    $passive : bool = false
-    $durable : bool = false
-    $exclusive : bool = false
-    $auto_delete : bool = true
-    $nowait : bool = false
-    $arguments : array<string|int, mixed>|AMQPTable = array()
-    $ticket : int|null = null
-    */
-    $channel->queue_declare($queue, false, true, false, false, false, new AMQPTable(array("x-dead-letter-exchange" => "localega.dead")));
-    $channel->queue_bind($queue, $mq_exchange, $routing_key, false, new AMQPTable(array("x-dead-letter-exchange" => "localega.dead")));
+
+/*
+ * Routing key to queue name mapping.
+ * Each queue is durable and has its own dead-letter exchange.
+ */
+$routingKeys = [
+    'files.completed' => 'completed',
+    'files.error'     => 'error',
+    'files.inbox'     => 'inbox',
+    'files.verified'  => 'verified',
+];
+
+$deadLetterArgs = new AMQPTable(['x-dead-letter-exchange' => 'localega.dead']);
+
+foreach ($routingKeys as $routingKey => $queue) {
+    $channel->queue_declare($queue, false, true, false, false, false, $deadLetterArgs);
+    $channel->queue_bind($queue, $mq_exchange, $routingKey, false, $deadLetterArgs);
 }
-$queues = array_unique(array_values($routing_keys));
-foreach ($queues as $queue) {
+
+// Register consumers (multiple routing keys may share the same callback)
+foreach (array_unique(array_values($routingKeys)) as $queue) {
     $channel->basic_consume($queue, '', false, false, false, false, $callbacks[$queue]);
 }
+
+// ---------------------------------------------------------------------------
+// Main loop
+// ---------------------------------------------------------------------------
 
 try {
     $channel->consume();
 } catch (\Throwable $exception) {
-    echo "[".date('Y-m-d h:i:s')."]". $exception->getMessage();
-}
-
-//
-// while ($channel->callbacks) {
-//     $channel->wait();
-// }
-// $queues = array("inbox","ingest");
-// foreach ($queues as $queue) {
-//     $channel->queue_declare($queue, false, false, false, false);
-//     $channel->basic_consume($queue, '', false, true, false, false, $callbacks[$queue]);
-// }
-
-
-while ($channel->callbacks) {
-    $channel->wait();
+    logInfo($exception->getMessage());
 }
 
 $channel->close();
