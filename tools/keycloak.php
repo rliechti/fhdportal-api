@@ -57,8 +57,8 @@ function getKeyCloakTokens()
 {
     $data = array(
         'grant_type' => 'client_credentials',
-        'client_id' => KEYCLOAK_DAC_CLIENT_ID,
-        'client_secret' => KEYCLOAK_DAC_SECRET
+        'client_id' => KEYCLOAK_CLIENT_ID,
+        'client_secret' => KEYCLOAK_SECRET
     );
 
     $fields_string = http_build_query($data);
