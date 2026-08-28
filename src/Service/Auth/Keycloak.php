@@ -14,9 +14,13 @@ $KEYCLOAK_SECRET    = $_ENV['KEYCLOAK_SECRET'];
 $KEYCLOAK_REALM     = $_ENV['KEYCLOAK_REALM'];
 $KEYCLOAK_CLIENT_ID = $_ENV['KEYCLOAK_CLIENT_ID'];
 $KEYCLOAK_URL       = rtrim($_ENV['KEYCLOAK_URL'], '/') . "/";
+$KEYCLOAK_ISSUER_URL = rtrim($_ENV['KEYCLOAK_ISSUER_URL'] ?? $_ENV['KEYCLOAK_URL'], '/') . "/";
 
 if (!defined("KEYCLOAK_URL")) {
     define("KEYCLOAK_URL", $KEYCLOAK_URL);
+}
+if (!defined("KEYCLOAK_ISSUER_URL")) {
+    define("KEYCLOAK_ISSUER_URL", $KEYCLOAK_ISSUER_URL);
 }
 if (!defined("KEYCLOAK_REALM")) {
     define("KEYCLOAK_REALM", $KEYCLOAK_REALM);
@@ -178,7 +182,7 @@ class Keycloak
             $keys    = JWK::parseKeySet($this->getSigningKeys(), 'RS256');
             $decoded = JWT::decode($encodedToken, $keys);
             $user    = json_decode(json_encode($decoded), true);            
-            $expectedIssuer = KEYCLOAK_URL . 'realms/' . KEYCLOAK_REALM;
+            $expectedIssuer = KEYCLOAK_ISSUER_URL . 'realms/' . KEYCLOAK_REALM;
             if (($user['iss'] ?? null) !== $expectedIssuer) {
                 throw new \Exception('Unexpected token issuer: ' . ($user['iss'] ?? '(none)'));
             }
