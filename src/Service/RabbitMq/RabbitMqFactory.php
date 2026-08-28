@@ -17,7 +17,7 @@ use MeekroDB;
 class RabbitMqFactory
 {
     public static function create(string $enabled, MeekroDB $db): RabbitMqInterface
-    {   
+    {
         if (strtolower(trim($enabled)) === 'false') {
             return new NullRabbitMq();
         }

@@ -174,6 +174,7 @@ pg_exec pg_dump \
     --schema-only \
     "$DB_NAME" \
 | grep -v '^\\[a-zA-Z]' \
+| grep -v 'transaction_timeout' \
 > "$OUTPUT_PATH"
 
 # ---------------------------------------------------------------------------

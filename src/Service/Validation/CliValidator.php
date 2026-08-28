@@ -44,7 +44,6 @@ class CliValidator
         }
 
         $extension = strtolower(pathinfo($filePath, PATHINFO_EXTENSION));
-
         if ($extension === 'json') {
             $jsonContent = file_get_contents($filePath);
             if ($jsonContent === false) {
@@ -190,6 +189,7 @@ class CliValidator
 
         return [
             'php',
+            '-d memory_limit=512M',
             $pharPath,
             'validate',
             '--resource-type=' . $resourceType,
@@ -229,7 +229,6 @@ class CliValidator
     {
         $process->run();
         $output = trim($process->getOutput());
-
         $errorOutput = trim($process->getErrorOutput());
         $outputStatus = "";
         if (is_string($output)) {
@@ -325,8 +324,8 @@ class CliValidator
                     }
                 }
 
-                // Store full output for debugging if needed
-                if (!empty($output)) {
+                // Store full output for debugging if needed - dev only, never to an internet-facing caller.
+                if (!empty($output) && ($_ENV['APP_ENV'] ?? 'prod') === 'dev') {
                     $error['debug'] = $output;
                 }
             } else {

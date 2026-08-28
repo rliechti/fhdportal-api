@@ -4,6 +4,7 @@ namespace App\Controller;
 
 use App\Service\Auth\Keycloak;
 use OpenApi\Attributes as OA;
+use Psr\Log\LoggerInterface;
 use Symfony\Component\HttpFoundation\JsonResponse;
 use Symfony\Component\HttpFoundation\Request;
 use Symfony\Component\Routing\Attribute\Route;
@@ -46,7 +47,7 @@ class AnalysisController extends ResourceController
     #[Route('/submissions/{study_id}/analyses', name: 'get_study_analyses', methods: ['GET'])]
     public function getStudyAnalyses(Keycloak $auth, string $study_id): JsonResponse
     {
-        return $this->listResources($auth, $study_id);
+        return $this->listResources($auth, $study_id, 'edit');
     }
 
     #[OA\Post(
@@ -82,9 +83,9 @@ class AnalysisController extends ResourceController
         ]
     )]
     #[Route('/submissions/{study_id}/analyses', name: 'post_analysis', methods: ['POST'])]
-    public function postAnalysis(Request $request, Keycloak $auth, string $study_id): JsonResponse
+    public function postAnalysis(Request $request, Keycloak $auth, string $study_id, LoggerInterface $logger): JsonResponse
     {
-        return $this->postResource($request, $auth, $study_id);
+        return $this->postResource($request, $auth, $study_id, $logger);
     }
 
     #[OA\Put(
@@ -126,9 +127,9 @@ class AnalysisController extends ResourceController
         ]
     )]
     #[Route('/submissions/{study_id}/analyses/{analysis_id}', name: 'put_analysis', methods: ['PUT'])]
-    public function putAnalysis(Request $request, Keycloak $auth, string $study_id, string $analysis_id): JsonResponse
+    public function putAnalysis(Request $request, Keycloak $auth, string $study_id, string $analysis_id, LoggerInterface $logger): JsonResponse
     {
-        return $this->putResource($request, $auth, $study_id, $analysis_id);
+        return $this->putResource($request, $auth, $study_id, $analysis_id, $logger);
     }
 
     #[OA\Delete(

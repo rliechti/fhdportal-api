@@ -50,8 +50,7 @@ class StudyController extends AbstractController
     )]
     public function getStudies(Request $request, Keycloak $auth, ResourceReadService $readResource): JsonResponse
     {
-        $studies = $readResource->listResources($auth, 'Study', null, 'read', 'published');
-
+        $studies = $readResource->listResources($auth, 'Study', null, 'read', 'published,revised,re-submitted');
         $studies = array_map(function ($s) {
             return [
                 'id'           => $s['id'],
@@ -59,7 +58,7 @@ class StudyController extends AbstractController
                 'title'        => $s['title'],
                 'description'  => $s['properties']['description'] ?? '',
                 'study_type'   => $s['properties']['study_type'],
-                'released_date'=> $s['release_date'] ?? null,
+                'released_date'=> $s['released_date'] ?? null,
                 'nb_datasets'  => (int)($s['nb_public_datasets'] ?? 0)
             ];
         }, (array) $studies);
@@ -94,7 +93,7 @@ class StudyController extends AbstractController
     )]
     public function getStudy(Keycloak $auth, ResourceReadService $readResource, string $study_id): JsonResponse
     {
-        $study = $readResource->getResource($auth, 'Study', $study_id, 'read', 'published');
+        $study = $readResource->getResource($auth, 'Study', $study_id, 'read', 'published,revised,re-submitted');
 
         if (isset($study['error'])) {
             return new JsonResponse($study['error']['message'], status: $study['error']['status']);
@@ -102,16 +101,24 @@ class StudyController extends AbstractController
 
         $user = $auth->getDetails();
         $study = (array) $study['properties'];
-
+        if (isset($study['extra_attributes'])){
+            unset($study['extra_attributes']);
+        }
         $study['datasets'] = $readResource->listResources($auth, 'Dataset', $study_id, 'read');
         $study['datasets'] = array_map(function ($d) {
+            $nbSamples = 0;
+            foreach($d['properties'] as $kp => $vp){
+                if (strpos($kp,'run_public_ids') !== FALSE){
+                    $nbSamples += count($d['properties'][$kp]);
+                }
+            }
             return [
                 'id'          => $d['id'],
                 'public_id'   => $d['properties']['public_id'],
                 'title'       => $d['properties']['title'],
                 'description' => $d['properties']['description'],
                 'types'       => $d['properties']['dataset_types'],
-                'nb_samples'  => count($d['properties']['run_public_ids'] ?? [])
+                'nb_samples'  => $nbSamples
             ];
         }, $study['datasets']);
 

@@ -22,9 +22,8 @@ class ResourceRelationshipService
      * @param string $range_type_name Range resource type name
      * @param string $domain_id Domain resource ID
      * @param string $range_id Range resource ID
-     * @param bool $verbose Whether to output debug information
      */
-    public function createRelationship(string $domain_type_name, string $range_type_name, string $domain_id, string $range_id, int $userId, bool $verbose = false): string|false
+    public function createRelationship(string $domain_type_name, string $range_type_name, string $domain_id, string $range_id, int $userId): string|false
     {
         if (strtolower($domain_type_name) === strtolower($range_type_name)){
           return false;  
@@ -42,11 +41,11 @@ class ResourceRelationshipService
                 strtolower($domain_type_name),
                 strtolower($range_type_name)
             );
-            if ($relation_rule) {
-                $tmp_id = $domain_id;
-                $domain_id = $range_id;
-                $range_id = $tmp_id;
-            }
+            // if ($relation_rule) {
+            //     $tmp_id = $domain_id;
+            //     $domain_id = $range_id;
+            //     $range_id = $tmp_id;
+            // }
         }
 
         if ($relation_rule) {
@@ -59,9 +58,6 @@ class ResourceRelationshipService
             );
 
             if (!$existing_relation) {
-                if ($verbose) {
-                    print("\tcreate relationship\t");
-                }
 
                 $uuid = Uuid::uuid4();
                 $relation = [
@@ -115,16 +111,14 @@ class ResourceRelationshipService
     /**
      * Delete relationship between two resources 
      */
-    public function deleteRelationship(string $domain_id, string $range_id, int $userId): void
+    public function deleteRelationship(string $domain_id, string $range_id, ?int $userId): void
     {
         $relationshipId = $this->db->queryFirstField(
             "SELECT id from relationship where domain_resource_id = %s and range_resource_id = %s",
             $domain_id,
             $range_id
         );
-
         if ($relationshipId) {
-            // $this->db->delete("relationship", "id = %s", $relationshipId);
 	        $this->db->update("relationship", array("status_type_id" => 'DEL'), "id = %s", $relationshipId);
 			$log_uuid = Uuid::uuid4();
 			$relation_log = [
@@ -140,8 +134,8 @@ class ResourceRelationshipService
     /**
      * Update relationship activity 
      */
-    public function updateRelationshipStatus(string $domain_id, string $range_id, bool $isActive, int $userId): void
-    {
+    public function updateRelationshipStatus(string $domain_id, string $range_id, string $status_type_id, bool $isActive, ?int $userId): void
+    {   
         $relationshipId = $this->db->queryFirstField(
             "SELECT id from relationship where domain_resource_id = %s and range_resource_id = %s",
             $domain_id,
@@ -156,7 +150,7 @@ class ResourceRelationshipService
             throw new Exception("Error: this $domain was not linked to this $range", 500);
         }
 
-        $this->db->update("relationship", array("is_active" => $isActive), "id = %s", $relationshipId);
+        $this->db->update("relationship", array("is_active" => $isActive, "status_type_id" => $status_type_id), "id = %s", $relationshipId);
 		$log_uuid = Uuid::uuid4();
 		$relation_log = [
 			'id' => $log_uuid->toString(),

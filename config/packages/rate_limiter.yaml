@@ -1,0 +1,14 @@
+framework:
+    rate_limiter:
+        anonymous:
+            policy: 'sliding_window'
+            limit: 60
+            interval: '1 minute'
+        authenticated:
+            policy: 'sliding_window'
+            limit: 600
+            interval: '1 minute'
+        expensive:
+            policy: 'token_bucket'
+            limit: 5
+            rate: { interval: '1 minute', amount: 5 }

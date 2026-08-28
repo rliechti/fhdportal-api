@@ -19,6 +19,9 @@ use Symfony\Component\HttpFoundation\JsonResponse;
 use Symfony\Component\HttpKernel\Exception\HttpException;
 use Symfony\Component\HttpKernel\Exception\NotFoundHttpException;
 use Symfony\Component\Serializer\SerializerInterface;
+use Symfony\Component\Mailer\MailerInterface;
+use Symfony\Component\Mailer\Exception\TransportExceptionInterface;
+use Symfony\Component\Mime\Email;
 use Symfony\Component\Yaml\Yaml;
 use Psr\Log\LoggerInterface;
 /**
@@ -37,6 +40,7 @@ final class ResourceEditService
     private FileImportHelper $fileHelper;
     private ResourceRelationshipService $relationshipService;
     private ResourceImportService $importService;
+    private MailerInterface $mailer;
     // private LoggerInterface $logger;
 
     public function __construct(
@@ -51,6 +55,7 @@ final class ResourceEditService
         FileImportHelper $fileHelper,
         ResourceRelationshipService $relationshipService,
         ResourceImportService $importService,
+        MailerInterface $mailer
         // LoggerInterface $logger
     ) {
         $this->db = $db;
@@ -64,6 +69,7 @@ final class ResourceEditService
         $this->fileHelper = $fileHelper;
         $this->relationshipService = $relationshipService;
         $this->importService = $importService;
+        $this->mailer = $mailer;
         // $this->logger = $logger;
         // resolve circular dependency
         $this->importService->setResourceEditService($this);
@@ -125,18 +131,18 @@ final class ResourceEditService
         }
         // Check if resource exists by public_id
         elseif (!empty($propertiesArray['public_id'])) {
-            $existingId = $this->db->queryFirstField(
-                "SELECT id FROM resource WHERE resource.properties ->> 'public_id' = %s",
+            $existingResource = $this->db->queryFirstRow(
+                "SELECT id, status_type_id FROM resource WHERE resource.properties ->> 'public_id' = %s",
                 $propertiesArray['public_id']
             );
-
+            $existingId = $existingResource['id'];
+            $data['status_type_id'] = $existingResource['status_type_id'];
             if ($existingId) {
                 $actionTypeId = 'MOD';
                 $data['id'] = $existingId;
                 $propertiesArray['id'] = $existingId;
             }
         }
-
         // For new resources, check for duplicates based on required schema fields
         if ($actionTypeId === 'CRE') {
             $requiredJson = $this->db->queryFirstField(
@@ -198,15 +204,16 @@ final class ResourceEditService
                 }
                 if (isset($propertiesArray[$requiredField])) {
                     if (is_array($propertiesArray[$requiredField])) {
-                        $arrayValues = implode(',', $propertiesArray[$requiredField]);
+                        // Bind the incoming values as a JSON array literal (cast to jsonb) rather than
+                        // building a Postgres text[] array literal by hand, so escaping is handled by
+                        // json_encode()/PDO instead of manual quoting. The field name is interpolated
+                        // directly (like the scalar branch below) since it comes from the resource-type
+                        // schema, not user input, and gives each field its own placeholder name.
                         $whereConditions[] = sprintf(
-                            "to_jsonb(string_to_array('%s',',')) <@ (resource.properties -> '%s')::jsonb " .
-                            "AND to_jsonb(string_to_array('%s',',')) @> (resource.properties -> '%s')::jsonb",
-                            $arrayValues,
-                            $requiredField,
-                            $arrayValues,
-                            $requiredField
+                            "(resource.properties -> '%s')::jsonb <@ %%s_%s::jsonb AND (resource.properties -> '%s')::jsonb @> %%s_%s::jsonb",
+                            $requiredField, $requiredField, $requiredField, $requiredField
                         );
+                        $queryParams[$requiredField] = json_encode(array_values($propertiesArray[$requiredField]));
                     } else {
                         $whereConditions[] = sprintf("resource.properties ->> '%s' = %%s_%s", $requiredField, $requiredField);
                         $queryParams[$requiredField] = $propertiesArray[$requiredField];
@@ -379,6 +386,17 @@ final class ResourceEditService
                 ]);
             }
         } else {
+            // check permissions
+            $test = $this->db->queryFirstField(
+                "SELECT resource_id FROM resource_user_view WHERE resource_id = %s AND user_id = %i AND permissions LIKE %ss",
+                $data['id'],
+                $userId,
+                'edit'
+            );
+
+            if (!$test) {
+                throw new Exception("Error: permission denied to edit resource: " . $data['public_id'], 401);
+            }
             $this->db->update('resource', $data, 'id = %s', $data['id']);
         }
 		
@@ -387,14 +405,14 @@ final class ResourceEditService
 		
         // Create study relationship
         if ($studyId && $studyId !== 'new') {
-            $this->relationshipService->createRelationship($resourceType['name'], 'Study', $data['id'], $studyId, $userId, false);
+            $this->relationshipService->createRelationship($resourceType['name'], 'Study', $data['id'], $studyId, $userId);
         }
         // Create dependency relationships (public_id references)
         foreach ($xref as $k => $x) {
 			$relation_id=null;
             if ($x['prop_name']) {
                 if ($x['id']) {
-                    $relation_id = $this->relationshipService->createRelationship($x['prop_name'], $resourceType['name'], $x['id'], $data['id'], $userId, false);
+                    $relation_id = $this->relationshipService->createRelationship($x['prop_name'], $resourceType['name'], $x['id'], $data['id'], $userId);
         			if($relation_id){
         				foreach($existingRelationships as $idx => $r){
         					if($r['id']==$relation_id){
@@ -404,7 +422,7 @@ final class ResourceEditService
         			}
                     if ($x['prop_name'] == 'SdaFile'){
                         if ($studyId && $studyId !== 'new') {
-                            $relation_id = $this->relationshipService->createRelationship($x['prop_name'], 'Study', $x['id'], $studyId, $userId, false);
+                            $relation_id = $this->relationshipService->createRelationship($x['prop_name'], 'Study', $x['id'], $studyId, $userId);
                 			if($relation_id){
                 				foreach($existingRelationships as $idx => $r){
                 					if($r['id']==$relation_id){
@@ -416,7 +434,7 @@ final class ResourceEditService
                     }
                 } elseif (count($x['ids'])) {
                     foreach ($x['ids'] as $xid) {
-                        $relation_id = $this->relationshipService->createRelationship($x['prop_name'], $resourceType['name'], $xid, $data['id'], $userId, false);
+                        $relation_id = $this->relationshipService->createRelationship($x['prop_name'], $resourceType['name'], $xid, $data['id'], $userId);
             			if($relation_id){
             				foreach($existingRelationships as $idx => $r){
             					if($r['id']==$relation_id){
@@ -426,7 +444,7 @@ final class ResourceEditService
             			}                        
                         if ($x['prop_name'] == 'SdaFile'){
                             if ($studyId && $studyId !== 'new') {
-                                $relation_id = $this->relationshipService->createRelationship($x['prop_name'], 'Study', $xid, $studyId, $userId, false);
+                                $relation_id = $this->relationshipService->createRelationship($x['prop_name'], 'Study', $xid, $studyId, $userId);
                     			if($relation_id){
                     				foreach($existingRelationships as $idx => $r){
                     					if($r['id']==$relation_id){
@@ -448,16 +466,9 @@ final class ResourceEditService
     			}
     		}            
         }
-
+        
         // Log the action
-        $logUuid = Uuid::uuid4()->toString();
-        $this->db->insert('resource_log', [
-            'id' => $logUuid,
-            'resource_id' => $data['id'],
-            'user_id' => $userId,
-            'action_type_id' => $actionTypeId,
-            'properties' => $data['properties']
-        ]);
+        $this->logAction($data, $actionTypeId, null, $userId);
 
         $primaryKeys = $this->getResourceTypePrimaryKeys($resourceType['id']);
         $jsonPrimaryKeys = $this->db->queryFirstField(
@@ -492,14 +503,16 @@ final class ResourceEditService
 		
 	}
 
-    public function insertResourceData(array $resourceData, string $resourceType, string $studyId): array
+    public function insertResourceData(array $resourceData, string $resourceType, string $studyId, ?callable $onProgress = null): array
     {
-
         $insertResults = array();
         $insertedResources = array();
         $success = true;
         $actions = array("inserted" => 0, "updated" => 0);
+        $total = count($resourceData);
+        $rowNumber = 0;
         foreach ($resourceData as $singleResourceData) {
+            $rowNumber++;
             $properties = (object)$singleResourceData;
             $user = $this->auth->getDetails();
 
@@ -541,6 +554,9 @@ final class ResourceEditService
             } elseif ($insertResult['action_type_id'] == 'MOD') {
                 $actions['updated']++;
             }
+            if ($onProgress) {
+                $onProgress($rowNumber, $total, $resourceType);
+            }
         }
         $messages = [];
         foreach ($actions as $action => $nb) {
@@ -564,7 +580,7 @@ final class ResourceEditService
     /**
      * Upload resources
      */
-    public function uploadResources(Keycloak $auth, string $study_id, mixed $request, string $project_dir, array $content): mixed
+    public function uploadResources(Keycloak $auth, string $study_id, mixed $request, string $project_dir, array $content, ?callable $onProgress = null): mixed
     {
         $destination = $project_dir . '/data/studies/';
         $user = $auth->getDetails();
@@ -577,6 +593,10 @@ final class ResourceEditService
                 throw new Exception("Error: resource type " . $content['resource_type_id'] . " is unknown", 500);
             }
             $study = $this->db->queryFirstRow("SELECT id, resource.properties->>'public_id' as public_id from resource where resource.properties->>'public_id' = %s", $study_id);
+            if (!$study) {
+                throw new NotFoundHttpException("Study not found: " . $study_id);
+            }
+            $this->assertCanEditStudy($study['id'], $auth);
             $study_public_id = $study_id;
             $study_id = $study['id'];
         }
@@ -712,8 +732,7 @@ final class ResourceEditService
                 if ($study_id == 'new') {
                     // Handle a new study import
                     try {
-                        $result = $this->importService->importResource($study_id, "$destination/$filename", $user['email'], 'Study', +$user['id']);
-
+                        $result = $this->importService->importResource($study_id, "$destination/$filename", $user['email'], 'Study', +$user['id'], $onProgress);
                         if (!$result['success']) {
                             return json_encode($result);
                             // throw new Exception("Study import failed: " . ($result['message'] ?? 'Unknown error'));
@@ -726,7 +745,7 @@ final class ResourceEditService
                 } else {
                     // Handle a resource import for an existing study
                     try {
-                        $result = $this->importService->importResource($study_id, "$destination/$filename", $user['email'], $resource_type['name'], +$user['id']);
+                        $result = $this->importService->importResource($study_id, "$destination/$filename", $user['email'], $resource_type['name'], +$user['id'], $onProgress);
                         if (is_array($result) && isset($result['resources'])) {
                             if (isset($result['success'])) {
                                 foreach ($result['resources'] as $idx => $r) {
@@ -756,6 +775,28 @@ final class ResourceEditService
         ]);
     }
 
+
+    /**
+     * Assert the caller holds 'edit' on the given study before anything is
+     * attached to it. Centralised so every write path shares one definition
+     * (security audit H-3).
+     */
+    private function assertCanEditStudy(string $studyResourceId, Keycloak $auth): void
+    {
+        if ($auth->isAdmin() || $auth->isDacCli()) {
+            return;
+        }
+        $user = $auth->getDetails();
+        $permitted = $this->db->queryFirstField(
+            "SELECT resource_id FROM resource_user_view WHERE resource_id = %s AND user_id = %i AND permissions LIKE %ss",
+            $studyResourceId,
+            $user['id'] ?? 0,
+            'edit'
+        );
+        if (!$permitted) {
+            throw new HttpException(403, 'Not permitted to add resources to this study');
+        }
+    }
 
     public function editResource(
         $resource,
@@ -794,6 +835,7 @@ final class ResourceEditService
             if (!$study) {
                 throw new Exception("Study not found: " . $studyId, 404);
             }
+            $this->assertCanEditStudy($study['id'], $auth);
             $studyId = $study['id'];
             $destination = $projectDir . "/data/studies/" . $study['public_id'] . "/";
         }
@@ -844,6 +886,55 @@ final class ResourceEditService
     }
 
 
+    private function registerNewVersion(string $resourceId, Keycloak $auth): int
+    {
+        $user = $auth->getDetails();
+        // Determine if ID is UUID format or public_id to build query field
+        $field = $this->helper->checkUuid($resourceId) ? 'id' : "properties->>'public_id'";
+
+        // Fetch the resource record by id or public_id
+        $resource = $this->db->queryFirstRow(
+            "SELECT id, properties->>'public_id' AS public_id,properties FROM resource WHERE $field = %s_id",
+            ['id' => $resourceId]
+        );
+
+        if (!$resource) {
+            throw new Exception("Error: unknown resource " . $resourceId, 500);
+        }
+
+        $last_log_id = $this->db->queryFirstField("SELECT
+        	resource_log.id,
+        	action_time AS resource_log_id
+        FROM
+        	resource_log
+        	inner join resource on resource_log.properties = resource.properties and resource_log.resource_id = resource.id
+        WHERE
+        	resource_log.resource_id = %s
+        ORDER BY
+        	action_time DESC limit 1",
+            $resource['id']
+        );
+        if (!$last_log_id){
+            $this->logAction($resource, "MOD", $auth, $user['id']);
+            $last_log_id = $this->db->queryFirstField("SELECT
+            	resource_log.id,
+            	action_time AS resource_log_id
+            FROM
+            	resource_log
+            	inner join resource on resource_log.properties = resource.properties and resource_log.resource_id = resource.id
+            WHERE
+            	resource_log.resource_id = %s
+            ORDER BY
+            	action_time DESC limit 1",
+                $resource['id']
+            );
+        }
+        $last_version = $this->db->queryFirstField("SELECT coalesce(max(resource_log.\"version\"),'0') as last_version from resource_log where resource_log.resource_id = %s group by resource_log.resource_id", $resource['id']);
+        $version = intval($last_version) + 1;
+        $this->db->update("resource_log",array("version" => $version), "resource_log.id = %s", $last_log_id);
+        return $version;
+    }
+
 
     /**
      * Set the status of a resource, identified by ID or public ID, checking permissions.
@@ -872,8 +963,8 @@ final class ResourceEditService
             throw new Exception("Error: unknown resource " . $id, 500);
         }
 
-        // Only allow if user has appropriate permission or DAC CLI role
-        if (!$auth->isDacCli()) {
+        // Only allow if user has appropriate permission or DAC CLI role or admin Role
+        if (!$auth->isDacCli() && !$auth->isAdmin()) {
             $permission = ($status === 'DEL') ? 'delete' : 'edit';
 
             // Verify user permission on this resource
@@ -883,14 +974,12 @@ final class ResourceEditService
                 $user['id'],
                 $permission
             );
-
             if (!$test) {
                 throw new Exception("Error: permission denied to edit resource: " . $resource['public_id'], 401);
             }
         }
-
         // Set the status via helper method
-        $this->setResourceStatusById($resource['id'], $status);
+        $this->setResourceStatusById($resource['id'], $status, $auth);
 
         return $resource['id'];
     }
@@ -905,7 +994,7 @@ final class ResourceEditService
      *
      * @throws Exception on unknown resource or invalid status.
      */
-    public function setResourceStatusById(string $resource_id, string $status): string
+    private function setResourceStatusById(string $resource_id, string $status, Keycloak $auth ): string
     {
         // Find valid status_type_id from given status (name or id)
         $status_id = $this->db->queryFirstField(
@@ -927,9 +1016,11 @@ final class ResourceEditService
         if (!$resource) {
             throw new Exception("Error: $resource_id is unknown", 500);
         }
-
         // Update status if different
         if ($resource['status_type_id'] != $status_id) {
+            if ($status_id === 'REV'){
+                $this->registerNewVersion($resource['id'], $auth);
+            }
             $this->db->update("resource", ['status_type_id' => $status_id], "id = %s", $resource['id']);
         }
 
@@ -955,14 +1046,14 @@ final class ResourceEditService
 
             if (!$other_relationships) {
                 // Recursive update status for child if allowed
-                $this->setResourceStatusById($child_resource_id, $status_id);
+                $this->setResourceStatusById($child_resource_id, $status_id, $auth);
             }
         }
 
         return $resource['id'];
     }
 
-    public function editResourceUser(string $resourceId, array $user, $auth): array
+    public function editResourceUser(string $resourceId, array $user, Keycloak $auth): array
     {
         // Fetch resource type
         $resourceType = $this->db->queryFirstField(
@@ -975,6 +1066,28 @@ final class ResourceEditService
 
         if (!$resourceType) {
             throw new HttpException(500, "Resource doesn't exist!");
+        }
+
+        // Only a caller who can already edit this resource may grant or change ACLs on it
+        $callerPerm = $this->db->queryFirstField(
+            "SELECT permissions FROM resource_user_view WHERE resource_id=%s AND user_id=%i",
+            $resourceId, $auth->getDetails()['id']);
+        if (!$callerPerm || strpos($callerPerm, 'edit') === false) {
+            throw new HttpException(403, 'Not permitted to manage users on this resource');
+        }
+
+        // Whitelist grantable roles; ownership is transferred through a dedicated
+        // flow, never through this generic collaborator endpoint (security audit M-1).
+        // Both request-body shapes seen historically ({role:{id}} and {role_id}) are accepted.
+        $requestedRole = $user['role']['id'] ?? $user['role_id'] ?? null;
+        if (!in_array($requestedRole, ['WRI', 'REA', 'COM'], true)) {
+            throw new HttpException(400, 'Invalid or non-grantable role');
+        }
+
+        // Confirm the target user actually exists.
+        $targetId = $this->db->queryFirstField('SELECT id FROM "user" WHERE id = %i', $user['id'] ?? 0);
+        if (!$targetId) {
+            throw new HttpException(400, 'Unknown target user');
         }
 
         // Check existing access
@@ -990,13 +1103,13 @@ final class ResourceEditService
             $this->db->insert('resource_acl', [
                 'user_id' => $user['id'],
                 'resource_id' => $resourceId,
-                'role_id' => $user['role']['id']
+                'role_id' => $requestedRole
             ]);
-        } elseif ($access['role_id'] != $user['role_id']) {
+        } elseif ($access['role_id'] != $requestedRole) {
             // Update existing access
             $this->db->update(
                 'resource_acl',
-                ['role_id' => $user['role_id']],
+                ['role_id' => $requestedRole],
                 'resource_id = %s AND user_id = %i',
                 $resourceId,
                 $user['id']
@@ -1011,8 +1124,21 @@ final class ResourceEditService
             $resourceId
         );
     }
-    public function deleteResourceUser(string $resourceId, int $userId): array
+    public function deleteResourceUser(string $resourceId, int $userId, Keycloak $auth): array
     {
+
+        // check the CALLER (not the target being removed) can edit this resource
+        $callerPerm = $this->db->queryFirstField(
+            "SELECT resource_id FROM resource_user_view WHERE resource_id = %s AND user_id = %i AND permissions LIKE %ss",
+            $resourceId,
+            $auth->getDetails()['id'],
+            'edit'
+        );
+
+        if (!$callerPerm) {
+            throw new Exception("Error: permission denied to edit resource", 401);
+        }
+        
         // Delete the resource access
         $this->db->delete(
             'resource_acl',
@@ -1034,21 +1160,22 @@ final class ResourceEditService
     public function patchResource(string $resourceId, array $patch, Keycloak $auth): bool
     {
         // Authorization check
-        if ($auth->isGuest() || (!$auth->hasRole('submitter') && !$auth->isDacCli())) {
+        if ($auth->isGuest() || (!$auth->hasRole('submitter') && !$auth->isDacCli() && !$auth->isAdmin())) {
             throw new HttpException(401, 'Unauthorized');
         }
-
         // Determine field type
         $field = $this->helper->checkUuid($resourceId) ? 'id' : "resource.properties ->> 'public_id'";
         $resource = $this->db->queryFirstRow("SELECT *, resource.properties ->> 'public_id' as public_id from resource where " . $field . " = %s", $resourceId);
-
+        
         if (!$resource) {
             throw new NotFoundHttpException('Unknown resource');
         }
-
-        $isDacMember = $auth->checkDacMember($resourceId);
-
-        if ($auth->isDacCli() || $isDacMember) {
+        $isHelpDesk = $auth->isAdmin();        
+        $isDacMember = ($isHelpDesk) ? false : $auth->checkDacMember($resourceId);
+        if($isHelpDesk && isset($patch['status_type_id']) && $patch['status_type_id'] !== 'SUB'){
+            $this->handleAdminPatch($resource, $patch, $auth);
+        }
+        elseif ($isDacMember) {
             $this->handleDacPatch($resource, $patch, $auth);
         } else {
             $this->handleSubmitterPatch($resource, $patch, $auth);
@@ -1057,29 +1184,88 @@ final class ResourceEditService
         return true;
     }
 
+    private function handleAdminPatch(array $resource, array $patch, Keycloak $auth): void
+    {
+        $resourceType = $this->db->queryFirstField("SELECT resource_type from resource_view where id = %s",$resource['id']);
+        if ($resourceType == 'Study'){
+            $studyId = $resource['id'];
+        }
+        else{
+            $studyId = $this->db->queryFirstField("SELECT range_resource_id as study_id from relationship_view where domain_resource_id = %s and range_type = 'Study'", $resource['id']);            
+        }
+        $user = $auth->getDetails();
+        $userId = $user['id'] ?? null; // dacCli has no userId
+        $this->setResourceStatus($auth, $resource['id'], $patch['status_type_id']);
+        $actionType = $this->db->queryFirstField("SELECT id from action_type where id = %s",$patch['status_type_id']);
+        if (!$actionType){
+            $actionType = 'MOD';
+        }
+        $this->logAction($resource, $actionType, $auth);
+        // update study status //
+        if ($studyId){
+            $studyDatasetStatus = $this->db->queryFirstColumn(
+                "SELECT
+                      datasets.status_type_id
+                  FROM
+                  resource AS datasets
+                  INNER JOIN relationship_view ON datasets.id = relationship_view.domain_resource_id and relationship_view.domain_type = 'Dataset' and relationship_view.range_type = 'Study'
+                  WHERE relationship_view.range_resource_id = %s",
+                $studyId
+            );            
+        }
+        else{
+            $studyDatasetStatus = [];
+        }
+        $allStudyDatasetsArePub = count($studyDatasetStatus) > 0;
+        foreach ($studyDatasetStatus as $s) {
+            if ($s != 'PUB') {
+                $allStudyDatasetsArePub = false;
+            }
+        }
+
+        if ($allStudyDatasetsArePub) {
+            $this->setResourceStatus($auth, $studyId, 'PUB');
+            $studyProperties = $this->db->queryFirstField("SELECT properties from resource where id = %s", $studyId);
+            $this->logAction(['id' => $studyId, 'properties' => $studyProperties], 'PUB', $auth);
+        }
+        $newStatus = $patch['status_type_id'] ?? '';
+        if ($newStatus === "PUB" && stripos((string) $resourceType, 'Dataset') !== FALSE){
+            $email = $this->db->queryFirstField("SELECT \"user\".email FROM resource_acl INNER JOIN \"user\" ON resource_acl.user_id= \"user\".id WHERE resource_acl.resource_id=%s AND resource_acl.role_id='OWN';", $resource['id']);
+            $releasedDate = $this->db->queryFirstField("SELECT released_date from dataset_view where dataset_id = %s",$resource['id']);
+            if (!$email || !$releasedDate) {
+                throw new \RuntimeException(
+                    "Refusing to publish dataset.release: missing owner email or release date for resource {$resource['id']}"
+                );
+            }
+            $time = strtotime($releasedDate);
+            $this->rabbitMq->releaseDataset($resource['public_id'], $email, $time);
+        }
+    }
+
     private function handleDacPatch(array $resource, array $patch, Keycloak $auth): void
     {
+
         $studyId = $this->db->queryFirstField("SELECT range_resource_id as study_id from relationship_view where domain_resource_id = %s and range_type = 'Study'", $resource['id']);
         $policyId = $this->resolvePolicyId($patch);
         $user = $auth->getDetails();
-
+        $userId = $user['id'] ?? null; // dacCli has no userId
         if ($policyId && isset($patch['policy_status'])) {
             $isActive = str_starts_with(trim($patch['policy_status']), 'valid');
             $relationshipId = $this->db->queryFirstField("SELECT id from relationship where domain_resource_id = %s and range_resource_id = %s", $resource['id'], $policyId);
-
             if (!$relationshipId) {
                 throw new HttpException(500, 'Error: this policy was not linked to this dataset');
             }
-
             if ($patch['policy_status'] === 'reject') {
-	            $this->relationshipService->deleteRelationship($resource['id'], $policyId, $user['id']);
-                $this->setResourceStatus($auth, $resource['id'], 'REV');
+                $this->relationshipService->deleteRelationship($resource['id'],$policyId, $userId);
+                $previousStatusId = ($resource['status_type_id'] === 'SUB') ? 'DRA' : 'REV';
+                $this->setResourceStatus($auth, $resource['id'], $previousStatusId);
                 if ($studyId) {
-                    $this->setResourceStatus($auth, $studyId, 'REV');
+                    $this->setResourceStatus($auth, $studyId, $previousStatusId);
                 }
             } else {
-				$this->relationshipService->updateRelationshipStatus($resource['id'], $policyId, $isActive, $user['id']);
-                $this->logAction($resource, 'PUB', $auth);
+                $this->relationshipService->updateRelationshipStatus($resource['id'],$policyId, 'APR', $isActive, $userId);
+                $this->setResourceStatus($auth, $resource['id'], "APR");
+                $this->logAction($resource, 'APR', $auth);
                 // update study status //
                 $studyDatasetStatus = $this->db->queryFirstColumn(
                     "SELECT
@@ -1090,21 +1276,34 @@ final class ResourceEditService
                       WHERE relationship_view.range_resource_id = %s",
                     $studyId
                 );
-                $allStudyDatasetsArePub = true;
+                $allStudyDatasetsAreApr = true;
                 foreach ($studyDatasetStatus as $s) {
-                    if ($s != 'PUB') {
-                        $allStudyDatasetsArePub = false;
+                    if ($s != 'APR') {
+                        $allStudyDatasetsAreApr = false;
                     }
                 }
 
-                if ($allStudyDatasetsArePub) {
-                    $this->setResourceStatus($auth, $studyId, 'PUB');
+                if ($allStudyDatasetsAreApr) {
+                    $this->setResourceStatus($auth, $studyId, 'APR');
                     $studyProperties = $this->db->queryFirstField("SELECT properties from resource where id = %s", $studyId);
-                    $this->logAction(['id' => $studyId, 'properties' => $studyProperties], 'PUB', $auth);
+                    $this->logAction(['id' => $studyId, 'properties' => $studyProperties], 'APR', $auth);
+                    // send email to Help-Desk
+                    $properties = json_decode($studyProperties,true);
+                    $title = "FEGA new submission approved by DAC";
+                    $content = "The submission: " . ($properties['title'] ?? '') . " has been approved by a DAC". "\r\n\r\n";
+                    $content .= "Please review the ". count($studyDatasetStatus) ." included datasets." . "\r\n\r\n";
+                    $email = (new Email())
+                        ->from($_ENV['NO_REPLY_EMAIL'])
+                        ->to($_ENV['HELPDESK_EMAIL'])
+                        ->subject($title)
+                        ->text($content);
+                    try {
+                        $this->mailer->send($email);
+                    } catch (TransportExceptionInterface $e) {
+                        error_log("Warning: helpdesk notification email not sent: " . $e->getMessage());
+                    }
+                    
                 }
-
-                $email = $this->db->queryFirstField("SELECT \"user\".email FROM resource_acl INNER JOIN \"user\" ON resource_acl.user_id= \"user\".id WHERE resource_acl.resource_id=%s AND resource_acl.role_id='OWN';", $resource['id']);
-                $this->rabbitMq->releaseDataset($resource['public_id'], $email, time());
             }
         }
     }
@@ -1114,8 +1313,25 @@ final class ResourceEditService
         $updates = [];
         $user = $auth->getDetails();
 
+        // A submitter may only patch a resource they hold 'edit' permission on.
+        // Mirrors the check already used in setResourceStatus()/insertResourceFromProperties().
+        $permitted = $this->db->queryFirstField(
+            "SELECT resource_id FROM resource_user_view WHERE resource_id = %s AND user_id = %i AND permissions LIKE %ss",
+            $resource['id'],
+            $user['id'],
+            'edit'
+        );
+        if (!$permitted) {
+            throw new HttpException(403, 'Not permitted to modify this resource');
+        }
+
+        // Resources whose lifecycle no longer allows submitter edits.
+        if (in_array($resource['status_type_id'], ['PUB', 'APR'], true)) {
+            throw new HttpException(409, 'Published or approved resources cannot be patched');
+        }
+
         foreach ($patch as $key => $value) {
-            if (array_key_exists($key, $resource)) {
+            if (in_array($key, ['properties'], true)) {
                 $updates[$key] = $value;
                 $resource[$key] = $value;
             }
@@ -1125,10 +1341,14 @@ final class ResourceEditService
             $this->db->update("resource", $updates, "id = %s", $resource['id']);
         }
 
-        if (isset($updates['status_type_id'])) {
-            $this->setResourceStatus($auth, $resource['id'], $updates['status_type_id']);
+        $statusUpdate = $patch['status_type_id'] ?? null;
+        if ($statusUpdate !== null) {
+            if (!in_array($statusUpdate, ['SUB', 'RES', 'DRA', 'DEL'], true)) {
+                throw new HttpException(403, 'Not permitted to set this status');
+            }
+            $this->setResourceStatus($auth, $resource['id'], $statusUpdate);
         }
-        $actionTypeId = (isset($updates['status_type_id'])) ? $updates['status_type_id'] : "MOD";
+        $actionTypeId = $statusUpdate ?? "MOD";
         $dbActionType = $this->db->queryFirstField("SELECT id from action_type where id = %s", $actionTypeId);
         if (!$dbActionType) {
             $actionTypeId = "MOD";
@@ -1136,8 +1356,12 @@ final class ResourceEditService
         $this->logAction($resource, $actionTypeId, $auth, $user['id']);
     }
 
-    private function logAction(array $resource, string $actionTypeId, Keycloak $auth, ?string $userId = null): void
+    private function logAction(array $resource, string $actionTypeId, ?Keycloak $auth = null, ?string $userId = null): void
     {
+        if (!$userId){
+            $user = $auth->getDetails();
+            $userId = $user['id'];
+        }
         $log = [
             'id' => Uuid::uuid4()->toString(),
             'resource_id' => $resource['id'],

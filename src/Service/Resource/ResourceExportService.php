@@ -39,6 +39,8 @@ final class ResourceExportService
             throw new Exception('Unauthorized', 401);
         }
         $user = $auth->getDetails();
+        
+        
         $study_id = $this->db->queryFirstField("SELECT study_public_id from dataset_view where public_id = %s", $dataset_id);
         return $this->downloadSubmission($auth, $study_id, $project_dir);
     }
@@ -122,13 +124,15 @@ final class ResourceExportService
             throw new Exception("Unknown study: $study_id", 404);
         }
         // Verify user permission on study resource
+        
         $permission = $this->db->queryFirstField(
-            "SELECT resource_id FROM resource_user_view WHERE resource_id = %s AND user_id = %i",
+            "SELECT resource_id FROM resource_user_view WHERE resource_id = %s AND user_id = %i  AND permissions LIKE %ss",
             $study['id'],
-            $user['id']
+            $user['id'],
+            'edit'
         );
         if (!$permission) {
-            // throw new Exception('Unauthorized', 401);
+            throw new Exception('Unauthorized', 401);
         }
 
         // Include XLSXWriter library (consider autoload or better integration)

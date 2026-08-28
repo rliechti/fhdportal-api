@@ -8,9 +8,10 @@ use MeekroDB;
 final class ResourceRelationService
 {
     public function __construct(
-        private readonly MeekroDB $db,
-        private readonly GeneralHelperService $helper,
-    ) {
+        private MeekroDB $db,
+        private GeneralHelperService $helper,
+        )
+    {
     }
 
 

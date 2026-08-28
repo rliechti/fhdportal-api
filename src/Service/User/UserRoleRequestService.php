@@ -4,6 +4,7 @@ namespace App\Service\User;
 
 use App\Service\Auth\Keycloak;
 use App\Service\Auth\KeycloakService;
+use App\Service\Utility\GeneralHelperService;
 use MeekroDB;
 use Ramsey\Uuid\Uuid;
 use Symfony\Component\HttpFoundation\File\UploadedFile;
@@ -16,34 +17,21 @@ use Symfony\Component\Serializer\SerializerInterface;
 
 class UserRoleRequestService
 {
+    private const GRANTABLE_ROLES = ['submitter'];
+
     private MeekroDB $db;
     private MailerInterface $mailer;
     private SerializerInterface $serializer;
     private KeycloakService $keycloak;
+    private GeneralHelperService $helper;
 
-    public function __construct(MeekroDB $db, SerializerInterface $serializer, KeycloakService $keycloak, MailerInterface $mailer)
+    public function __construct(MeekroDB $db, SerializerInterface $serializer, KeycloakService $keycloak, MailerInterface $mailer, GeneralHelperService $helper)
     {
         $this->db = $db;
         $this->serializer = $serializer;
         $this->keycloak = $keycloak;
         $this->mailer = $mailer;
-    }
-
-    public function createUserDirectory(string $destination, bool $writable = false): ?JsonResponse
-    {
-        if (!file_exists($destination)) {
-            mkdir($destination, 0770, true);
-            if (!file_exists($destination)) {
-                return new JsonResponse($destination . " does not exist", 400);
-            }
-        }
-        if ($writable && !is_writable($destination)) {
-            chmod($destination, 0777);
-            if (!is_writable($destination)) {
-                return new JsonResponse($destination . " is not writable", 400);
-            }
-        }
-        return null;
+        $this->helper = $helper;
     }
 
     /**
@@ -60,7 +48,7 @@ class UserRoleRequestService
         $user = $auth->getDetails();
 
         $destination = $projectDir . '/data/dtpas/';
-        $response = $this->createUserDirectory($destination, true);
+        $response = $this->helper->createDirectory($destination, true);
         if ($response instanceof JsonResponse) {
             return ['error' => $response->getContent()];
         }
@@ -76,27 +64,28 @@ class UserRoleRequestService
             );
         }
 
-        // List of allowed extensions and MIME types
-        $allowedExtensions = ['pdf', 'docx'];
-        $allowedMimeTypes = [
-            'application/pdf',
-            'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+        // Validate actual content, not client-supplied filename/MIME claims - both are
+        // attacker-controlled and were previously trusted outright (security audit M-11).
+        if ($uploadedFile->getSize() > 10 * 1024 * 1024) {
+            return array(
+                "status" => "error",
+                "message" => 'File exceeds the 10 MB limit.'
+            );
+        }
+        $allowedByRealMime = [
+            'application/pdf' => 'pdf',
+            'application/vnd.openxmlformats-officedocument.wordprocessingml.document' => 'docx',
         ];
+        $finfo = finfo_open(FILEINFO_MIME_TYPE);
+        $realMime = finfo_file($finfo, $uploadedFile->getPathname());
+        finfo_close($finfo);
 
-        // Check file extension
-        $fileExtension = $uploadedFile->getClientOriginalExtension();
-        $fileMimeType = $uploadedFile->getClientMimeType();
-
-        if (
-            !in_array(strtolower($fileExtension), $allowedExtensions, true) ||
-            !in_array($fileMimeType, $allowedMimeTypes, true)
-        ) {
+        if (!isset($allowedByRealMime[$realMime])) {
             return array(
                 "status" => "error",
                 "message" => 'Invalid file type. Only PDF and DOCX allowed.'
             );
         }
-
 
         $filepath = null;
 
@@ -117,16 +106,17 @@ class UserRoleRequestService
             }
 
             $filename = $uploadedFile->getClientOriginalName();
-            $pathinfo = pathinfo($filename);
-            $basename = $pathinfo['filename'];
-            $ext = $pathinfo['extension'];
-            $md5 = md5_file($uploadedFile->getPathname());
+            // Name the stored file from the verified content type and a content hash,
+            // never from client input (removes the regex-injection/path exposure that
+            // came from deriving it via pathinfo() on a client-supplied name).
+            $ext = $allowedByRealMime[$realMime];
+            $safeName = sprintf('dtpa_%s.%s', hash_file('sha256', $uploadedFile->getPathname()), $ext);
 
-            $potentialPath = $destination . $basename . "_" . $md5 . "." . $ext;
+            $potentialPath = $destination . $safeName;
             $filepath = str_replace($projectDir, "", $potentialPath);
 
             if (!file_exists($potentialPath)) {
-                $uploadedFile->move($destination, basename($potentialPath));
+                $uploadedFile->move($destination, $safeName);
                 if (!file_exists($potentialPath)) {
                     return ['error' => $potentialPath . " not copied to final directory"];
                 }
@@ -136,7 +126,7 @@ class UserRoleRequestService
                 "name" => $filepath,
                 "original_name" => $filename,
                 "filesize" => filesize($potentialPath),
-                "mime_type" => mime_content_type($potentialPath),
+                "mime_type" => $realMime,
                 "md5" => md5_file($potentialPath),
             ];
 
@@ -181,16 +171,19 @@ class UserRoleRequestService
         }
 
         $contents = [];
-        $role = $request->get('role');
-        if ($role) {
-            $ROLE = strtoupper($role);
-            if ($auth->hasRole($role)) {
-                throw new \Exception("The " . $role . " role is already assigned", 204);
-            }
-            $contents[] = "{$user['name']} ({$user['email']}) is requesting a {$ROLE} role.\r\n\r\n";
-            $contents[] = "Switch EduID is {$user['preferred_username']}\r\n\r\n";
-            $contents[] = "Thanks for reviewing this request.";
+        // The requested role is taken from an allowlist and never inlined raw into the
+        // help-desk email, which a human reads to decide whether to grant a privileged role.
+        $role = (string) $request->get('role', 'submitter');
+        if (!in_array($role, self::GRANTABLE_ROLES, true)) {
+            throw new \Exception('Unsupported role request', 400);
         }
+        if ($auth->hasRole($role)) {
+            throw new \Exception("The " . $role . " role is already assigned", 204);
+        }
+        $ROLE = strtoupper($role);
+        $contents[] = "{$user['name']} ({$user['email']}) is requesting a {$ROLE} role.\r\n\r\n";
+        $contents[] = "Switch EduID is {$user['preferred_username']}\r\n\r\n";
+        $contents[] = "Thanks for reviewing this request.";
 
         $title = "FEGA user request";
         $content = implode("", $contents) . "\r\n\r\n";

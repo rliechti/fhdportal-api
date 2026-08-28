@@ -12,9 +12,12 @@ use App\Service\Resource\ResourceRelationService;
 use App\Service\Resource\ResourceTemplateService;
 use App\Service\Dac\DatasetRequestService;
 use MeekroDB;
+use Psr\Log\LoggerInterface;
 use Symfony\Bundle\FrameworkBundle\Controller\AbstractController;
 use Symfony\Component\HttpFoundation\JsonResponse;
 use Symfony\Component\HttpFoundation\Request;
+use Symfony\Component\HttpKernel\Exception\HttpException;
+use Symfony\Component\HttpKernel\Exception\HttpExceptionInterface;
 use Symfony\Component\Serializer\SerializerInterface;
 
 abstract class ResourceController extends AbstractController
@@ -51,15 +54,31 @@ abstract class ResourceController extends AbstractController
         $this->datasetRequest = $datasetRequest;
     }
 
+    /**
+     * See SubmissionController::rethrowSafely() for the rationale (security audit H-8).
+     */
+    protected function rethrowSafely(\Throwable $e, LoggerInterface $logger, string $genericMessage): never
+    {
+        if ($e instanceof HttpExceptionInterface) {
+            throw $e;
+        }
+        $code = $e->getCode();
+        if ($code >= 400 && $code < 600) {
+            throw new HttpException($code, $e->getMessage(), $e);
+        }
+        $logger->error($genericMessage, ['exception' => $e]);
+        throw new HttpException(500, $genericMessage);
+    }
+
     // Abstract method to define resource type in child controllers (e.g. 'Sample', 'Run')
     abstract protected function getResourceType(): string;
 
     // Abstract method for route prefix (e.g. 'samples', 'runs')
     abstract protected function getRoutePrefix(): string;
 
-    public function listResources(Keycloak $auth, ?string $studyId = null): JsonResponse
+    public function listResources(Keycloak $auth, ?string $studyId = null, ?string $permission = 'read'): JsonResponse
     {
-        $resources = $this->resourceRead->listResources($auth, $this->getResourceType(), $studyId, 'read');
+        $resources = $this->resourceRead->listResources($auth, $this->getResourceType(), $studyId, $permission);
         $content = json_encode($resources);
         return new JsonResponse($content, 200, [], true);
     }
@@ -71,7 +90,7 @@ abstract class ResourceController extends AbstractController
         return new JsonResponse($content, 200, [], true);
     }
 
-    public function postResource(Request $request, Keycloak $auth, string $study_id): JsonResponse
+    public function postResource(Request $request, Keycloak $auth, string $study_id, LoggerInterface $logger): JsonResponse
     {
         if ($auth->isGuest()) {
             return new JsonResponse(['message' => 'Unauthorized'], 401);
@@ -94,11 +113,11 @@ abstract class ResourceController extends AbstractController
                 return new JsonResponse($content, 400, [], true);
             }
         } catch (\Exception $e) {
-            return new JsonResponse(['message' => $e->getMessage()], 500);
+            $this->rethrowSafely($e, $logger, 'Unable to create resource');
         }
     }
 
-    public function putResource(Request $request, Keycloak $auth, string $study_id, string $resource_id): JsonResponse
+    public function putResource(Request $request, Keycloak $auth, string $study_id, string $resource_id, LoggerInterface $logger): JsonResponse
     {
         if ($auth->isGuest()) {
             return new JsonResponse(['message' => 'Unauthorized'], 401);
@@ -125,7 +144,7 @@ abstract class ResourceController extends AbstractController
                 return new JsonResponse($content, 400, [], true);
             }
         } catch (\Exception $e) {
-            return new JsonResponse(['message' => $e->getMessage()], 500);
+            $this->rethrowSafely($e, $logger, 'Unable to update resource');
         }
     }
 

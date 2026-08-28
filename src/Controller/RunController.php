@@ -4,6 +4,7 @@ namespace App\Controller;
 
 use App\Service\Auth\Keycloak;
 use OpenApi\Attributes as OA;
+use Psr\Log\LoggerInterface;
 use Symfony\Component\HttpFoundation\JsonResponse;
 use Symfony\Component\HttpFoundation\Request;
 use Symfony\Component\Routing\Attribute\Route;
@@ -46,7 +47,7 @@ class RunController extends ResourceController
     )]
     public function getStudyRuns(Keycloak $auth, string $study_id): JsonResponse
     {
-        return $this->listResources($auth, $study_id);
+        return $this->listResources($auth, $study_id, 'edit');
     }
 
     #[Route('/submissions/{study_id}/runs', name: 'post_run', methods: ['POST'])]
@@ -76,9 +77,9 @@ class RunController extends ResourceController
             new OA\Response(response: 400, description: 'Invalid input')
         ]
     )]
-    public function postRun(Request $request, Keycloak $auth, string $study_id): JsonResponse
+    public function postRun(Request $request, Keycloak $auth, string $study_id, LoggerInterface $logger): JsonResponse
     {
-        return $this->postResource($request, $auth, $study_id);
+        return $this->postResource($request, $auth, $study_id, $logger);
     }
 
     #[Route('/submissions/{study_id}/runs/{run_id}', name: 'put_run', methods: ['PUT'])]
@@ -114,9 +115,9 @@ class RunController extends ResourceController
             new OA\Response(response: 400, description: 'Invalid input')
         ]
     )]
-    public function putRun(Request $request, Keycloak $auth, string $study_id, string $run_id): JsonResponse
+    public function putRun(Request $request, Keycloak $auth, string $study_id, string $run_id, LoggerInterface $logger): JsonResponse
     {
-        return $this->putResource($request, $auth, $study_id, $run_id);
+        return $this->putResource($request, $auth, $study_id, $run_id, $logger);
     }
 
     #[Route('/submissions/{study_id}/runs/{run_id}', name: 'delete_run', methods: ['DELETE'])]

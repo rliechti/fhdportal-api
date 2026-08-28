@@ -32,7 +32,7 @@ class KeycloakService
         if ($body !== null) {
             curl_setopt($ch, CURLOPT_POSTFIELDS, $body);
         }
-        curl_setopt($ch, CURLOPT_VERBOSE, true);
+        if (($_ENV['APP_ENV'] ?? 'prod') === 'dev') { curl_setopt($ch, CURLOPT_VERBOSE, true); }
 
 
         $result = curl_exec($ch);
@@ -92,15 +92,33 @@ class KeycloakService
         );
     }
 
-    public function getUsers(string $token = '', string $query = ''): array
+    public function getUsers(string $token = ''): array
     {
         if (empty($token)) {
             $tokens = $this->getTokens();
             $token = $tokens['token'];
         }
-        return $this->doRequest("admin/realms/{$this->realm}/users" . ($query ? "?$query" : ''), 'GET', [
+        return $this->doRequest("admin/realms/{$this->realm}/users", 'GET', [
             "Authorization: Bearer $token",
         ]);
+    }
+
+    /**
+     * Look up users by email. The query string is built here, from a typed parameter,
+     * rather than accepting a free-form query string from callers - a DAC member's
+     * externally-supplied email was previously concatenated directly into the admin
+     * API query string (security audit M-8).
+     */
+    public function findUsersByEmail(string $email, string $token = ''): array
+    {
+        if (empty($token)) {
+            $tokens = $this->getTokens();
+            $token = $tokens['token'];
+        }
+        $query = http_build_query(['email' => $email, 'exact' => 'true', 'max' => 2]);
+        return $this->doRequest("admin/realms/{$this->realm}/users?{$query}", 'GET', [
+            "Authorization: Bearer $token",
+        ]) ?? [];
     }
 
     public function getUser(string $userId, string $token = '', bool $brief = false): ?array
@@ -111,7 +129,12 @@ class KeycloakService
             $refreshToken = $tokens['refresh_token'];
         }
 
-        $user = $this->doRequest("admin/realms/{$this->realm}/users/$userId?briefRepresentation=true", 'GET', [
+        // Identifiers interpolated into the admin API path are encoded, defence in depth
+        // against callers that pass an identifier sourced from an external system (security
+        // audit M-8).
+        $encodedUserId = rawurlencode($userId);
+
+        $user = $this->doRequest("admin/realms/{$this->realm}/users/$encodedUserId?briefRepresentation=true", 'GET', [
             "Authorization: Bearer $token",
         ]);
 
@@ -123,7 +146,7 @@ class KeycloakService
             return $user;
         }
 
-        $roles = $this->doRequest("admin/realms/{$this->realm}/users/$userId/role-mappings/realm", 'GET', [
+        $roles = $this->doRequest("admin/realms/{$this->realm}/users/$encodedUserId/role-mappings/realm", 'GET', [
             "Authorization: Bearer $token",
         ]);
 
@@ -150,7 +173,7 @@ class KeycloakService
         $user['attributes'] = array_merge($user['attributes'] ?? [], $attributes);
         $body = json_encode($user);
 
-        $this->doRequest("admin/realms/{$this->realm}/users/$userId", 'PUT', [
+        $this->doRequest("admin/realms/{$this->realm}/users/" . rawurlencode($userId), 'PUT', [
             "Authorization: Bearer $token",
             'Content-Type: application/json'
         ], $body);
@@ -165,21 +188,23 @@ class KeycloakService
             $token = $tokens['token'];
         }
 
-        $availableRoles = $this->doRequest("admin/realms/{$this->realm}/users/$userId/role-mappings/realm/available", 'GET', [
+        $encodedUserId = rawurlencode($userId);
+
+        $availableRoles = $this->doRequest("admin/realms/{$this->realm}/users/$encodedUserId/role-mappings/realm/available", 'GET', [
             "Authorization: Bearer $token",
         ]);
         if (empty($availableRoles)) {
             return false;
         }
 
-        $currentRoles = $this->doRequest("admin/realms/{$this->realm}/users/$userId/role-mappings/realm", 'GET', [
+        $currentRoles = $this->doRequest("admin/realms/{$this->realm}/users/$encodedUserId/role-mappings/realm", 'GET', [
             "Authorization: Bearer $token",
         ]);
         // Remove roles not in the new list
         foreach ($currentRoles as $currentRole) {
             if (!in_array($currentRole['name'], $roles, true)) {
                 $body = json_encode([$currentRole]);
-                $this->doRequest("admin/realms/{$this->realm}/users/$userId/role-mappings/realm", 'DELETE', [
+                $this->doRequest("admin/realms/{$this->realm}/users/$encodedUserId/role-mappings/realm", 'DELETE', [
                     "Authorization: Bearer $token",
                     'Content-Type: application/json'
                 ], $body);
@@ -191,7 +216,7 @@ class KeycloakService
             foreach ($availableRoles as $availableRole) {
                 if ($role === $availableRole['name']) {
                     $body = json_encode([$availableRole]);
-                    $this->doRequest("admin/realms/{$this->realm}/users/$userId/role-mappings/realm", 'POST', [
+                    $this->doRequest("admin/realms/{$this->realm}/users/$encodedUserId/role-mappings/realm", 'POST', [
                         "Authorization: Bearer $token",
                         'Content-Type: application/json'
                     ], $body);

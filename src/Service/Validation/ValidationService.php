@@ -294,7 +294,7 @@ class ValidationService
                     if (!$xref_id) {
                         $return['status'] = "FAIL";
                         $return['message'] = "At least one referenced resource couldn't be linked";
-                        $return['errors'][] = $xrefsField['resource'].": ".$value." doesn't exist, or cannot be linked to this resource";
+                        $return['errors'][] = $xrefsField['resource'].": ".$value." doesn't exist, or cannot be linked to this resource: ".$userId." : ".$value;
                     }
                 }
             }

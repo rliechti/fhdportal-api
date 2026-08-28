@@ -6,7 +6,10 @@
 #   1. Dump the remote production database
 #   2. Copy the dump and restore script into the local Docker database container
 #   3. Run db_restore.sh inside the container
-#   4. Apply an optional local SQL script (data/db/custom.sql by default)
+#   4. Anonymise the restored copy (db_anonymise.sql) — NOT optional, and the
+#      sync aborts if this step fails. A production dump carries researcher PII
+#      and live DOA download credentials; neither belongs on a workstation.
+#   5. Apply an optional local SQL script (data/db/custom.sql by default)
 #      — can contain INSERTs, UPDATEs, sequence resets, or any custom SQL
 #      — skipped automatically if the file is empty or does not exist
 #
@@ -113,14 +116,26 @@ docker compose cp "$SCRIPT_DIR/db_restore.sh" "$DOCKER_SERVICE":/tmp/db_restore.
 # Step 3: Restore inside the container (non-interactive — confirmation was
 #         already obtained above at the db_sync level)
 # ---------------------------------------------------------------------------
-log "Step 3/4: Restoring inside container …"
+log "Step 3/5: Restoring inside container …"
 docker compose exec "$DOCKER_SERVICE" bash /tmp/db_restore.sh \
     -h localhost -p 5432 -U "$LOCAL_USER" -d "$LOCAL_DB" -y /tmp/restore.sql
 
 # ---------------------------------------------------------------------------
-# Step 4: Apply custom SQL script (if it exists and is non-empty)
+# Step 4: Anonymise (mandatory — not skippable, and the sync aborts on failure)
 # ---------------------------------------------------------------------------
-log "Step 4/4: Applying custom SQL script …"
+log "Step 4/5: Anonymising restored data …"
+ANONYMISE_SQL="$SCRIPT_DIR/db_anonymise.sql"
+[[ -f "$ANONYMISE_SQL" ]] || die "Anonymisation script not found: $ANONYMISE_SQL. Refusing to leave a non-anonymised production copy on this machine."
+docker compose cp "$ANONYMISE_SQL" "$DOCKER_SERVICE":/tmp/db_anonymise.sql
+docker compose exec "$DOCKER_SERVICE" \
+    psql -h localhost -p 5432 -U "$LOCAL_USER" -d "$LOCAL_DB" \
+    -v ON_ERROR_STOP=1 -f /tmp/db_anonymise.sql
+log "  Done."
+
+# ---------------------------------------------------------------------------
+# Step 5: Apply custom SQL script (if it exists and is non-empty)
+# ---------------------------------------------------------------------------
+log "Step 5/5: Applying custom SQL script …"
 
 if [[ ! -f "$CUSTOM_SQL" ]]; then
     log "  $CUSTOM_SQL not found — skipping."

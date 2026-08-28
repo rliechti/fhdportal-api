@@ -55,7 +55,6 @@ class ResourceReadService
     {
         // Parse the status string into an array if provided
         $status = $status ? explode(',', $status) : null;
-
         // Check authorization; guests are not allowed
         if ($auth->isGuest()) {
             throw new Exception('Unauthorized', 401);
@@ -63,23 +62,31 @@ class ResourceReadService
 
         // Retrieve user details for ID and permissions
         $user = $auth->getDetails();
-
+        $isDacCli = $auth->isDacCli();
+        $isHelpDesk = $auth->isAdmin();
         $join = '';
         $params = [
             'resource_type' => $resource_type,
             'user_id' => $user['id'],
             'permission' => $permission,
         ];
-
         // Base where clause with placeholders for querying resource_user_view
         $where = "WHERE resource_user_view.resource_type_name LIKE %ss_resource_type 
 	              AND resource_user_view.user_id = %i_user_id 
 	              AND resource_user_view.permissions LIKE %ss_permission 
 	              AND resource_user_view.status_type_id <> 'DEL'";
 
-        // If user has special DAC CLI role, override where clause to empty (full access?)
-        if ($auth->isDacCli()) {
-            $where = '';
+        // If user has special DAC CLI role or user is an Help Desk member, override where clause to empty (full access?)
+        if ($isDacCli) {
+            // $where = "WHERE resource_user_view.resource_type_name LIKE %ss_resource_type
+                      // AND resource_user_view.status_type_id <> 'DEL'";
+            $where = "WHERE resource_user_view.resource_type_name LIKE %ss_resource_type
+                      ";
+        }
+        else if ($isHelpDesk){
+            $where = "WHERE resource_user_view.resource_type_name LIKE %ss_resource_type
+                      AND (resource_user_view.status_type_id <> 'DEL' and (resource_user_view.user_id = %i_user_id or resource_user_view.status_type_id in ('APR','PUB')))";
+            
         }
 
         // If parent_id is provided, join the relationship view to restrict resources accordingly
@@ -96,8 +103,12 @@ class ResourceReadService
         //     'query' => "SELECT resource_id FROM resource_user_view $join $where",
         //     'params' => $params
         // ]);
-        $resource_ids = $this->db->queryFirstColumn("SELECT resource_id FROM resource_user_view $join $where", $params);
-
+        // List public datasets associated to a published study
+        $union = "";
+        if ($permission === 'read' && strtolower($resource_type) == 'dataset' && $parent_id){
+            $union = "UNION SELECT id as resource_id from dataset_view where status_type_id = 'PUB' and study_public_id = %s_parent_id";
+        }
+        $resource_ids = $this->db->queryFirstColumn("SELECT resource_id FROM resource_user_view $join $where $union", $params);
         $this->db->logfile = '';
         // If permission is 'read' and no parent restriction, add published public resources
         if ($permission === 'read' && !$parent_id) {
@@ -107,7 +118,7 @@ class ResourceReadService
                 $pub_params['public_id'] = $singlePublicId;
             }
             $public_ids = $this->db->queryFirstColumn(
-                "SELECT id FROM resource_view WHERE resource_view.resource_type LIKE %ss_resource_type AND resource_view.status_type_id='PUB' " . $where,
+                "SELECT id FROM resource_view WHERE resource_view.resource_type LIKE %ss_resource_type AND resource_view.status_type_id in ('PUB','REV','RES') " . $where,
                 $pub_params
             );
             foreach ($public_ids as $public_id) {
@@ -130,7 +141,6 @@ class ResourceReadService
             'status' => $status,
             'ids' => $resource_ids,
         ];
-
         // Compose the where clause for filtering by status or ownership
         $where = '';
         if ($status && is_array($status) && count($status) > 0) {
@@ -143,8 +153,15 @@ class ResourceReadService
             }
         }
         // Non-DAC CLI users should exclude deleted resources
-        if (!$auth->isDacCli()) {
+        if (!$isDacCli) {
             $where .= " AND status_type_id <> 'DEL' ";
+        }
+        else{
+            $params['status'][] = 're-submitted';
+            $params['status'][] = 'submitted';
+            $params['status'][] = 'verified';
+            $params['status'][] = 'draft';
+            $params['status'][] = 'deleted';
         }
 
         if ($singlePublicId) {
@@ -153,25 +170,58 @@ class ResourceReadService
         }
 
         // Fetch the full resource records for the filtered IDs and status
+        // $this->db->logfile = '/home/local/fega/webdir/log/sql.log';
+        // $this->logger->debug('{query} and {params}', [
+        //     'query' => "SELECT * FROM $db_view WHERE id IN %ls_ids $where",
+        //     'params' => $params
+        // ]);
+        // error_log("SELECT * FROM $db_view WHERE id IN %ls_ids $where");
+        // error_log(json_encode($params));
         $resources = $this->db->query("SELECT * FROM $db_view WHERE id IN %ls_ids $where", $params);
-
         // Enrich resources with access info, decoded properties, and current user permission
         if (is_array($resources)) {
-            $resources = array_map(function ($resource) use ($user) {
+            $resources = array_map(function ($resource) use ($user,$parent_id,$permission,$isDacCli) {
                 $resource['access'] = $this->db->query(
                     "SELECT username, permissions, user_id, role, role_id FROM resource_user_view WHERE resource_id = %s",
                     $resource['id']
                 );
                 $resource['properties'] = json_decode($resource['properties'], true);
-                $resource['current_permission'] = $this->db->queryFirstField(
-                    "SELECT permissions FROM resource_user_view WHERE resource_id = %s AND user_id = %i",
-                    $resource['id'],
-                    $user['id']
-                );
+                // if status_type_id == 'REV' or 'RES', fetch the latest version = last published //
+                if (($resource['status_type_id'] == 'REV' || $resource['status_type_id'] == 'RES') && $permission === 'read'){
+                    $properties = $this->db->queryFirstField("
+                        SELECT
+                        	resource_log.properties
+                        FROM
+                        	resource_log
+                        	inner join (		SELECT
+                        			coalesce(max(resource_log.\"version\"), '0') AS last_version,
+                        			resource_log.resource_id
+                        		FROM
+                        			resource_log
+                        		WHERE
+                        			resource_log.resource_id = %s_id
+                        		GROUP BY
+                        			resource_log.resource_id
+                        	) as last_resource_version on last_resource_version.resource_id = resource_log.resource_id and last_resource_version.\"last_version\" = resource_log.\"version\"
+                        WHERE
+                        	resource_log.resource_id = %s_id
+                        ;
+                    ",$resource);
+                    if ($properties){
+                        $resource['properties'] = json_decode($properties, true);
+                    }
+                }
+                if (!$isDacCli){
+                    $resource['current_permission'] = $this->db->queryFirstField(
+                        "SELECT permissions FROM resource_user_view WHERE resource_id = %s AND user_id = %i",
+                        $resource['id'],
+                        $user['id']
+                    );                    
+                }
                 return $resource;
             }, $resources);
         }
-
+        // error_log(json_encode($resources));
         return $resources;
     }
     /**
@@ -242,6 +292,32 @@ class ResourceReadService
 
         // Decode properties for further processing
         $resource['properties'] = json_decode($resource['properties'], true);
+        // Fetch properties latest version if resource in REV or RES mode and permission is 'READ'
+        if (($resource['status_type_id'] == 'REV' || $resource['status_type_id'] == 'RES') && $permission === 'read'){
+            $properties = $this->db->queryFirstField("
+                SELECT
+                	resource_log.properties
+                FROM
+                	resource_log
+                	inner join (		SELECT
+                			coalesce(max(resource_log.\"version\"), '0') AS last_version,
+                			resource_log.resource_id
+                		FROM
+                			resource_log
+                		WHERE
+                			resource_log.resource_id = %s_id
+                		GROUP BY
+                			resource_log.resource_id
+                	) as last_resource_version on last_resource_version.resource_id = resource_log.resource_id and last_resource_version.\"last_version\" = resource_log.\"version\"
+                WHERE
+                	resource_log.resource_id = %s_id
+                ;
+            ",$resource);
+            if ($properties){
+                $resource['properties'] = json_decode($properties, true);
+            }
+        }
+        
 
         // Initialize access and owner arrays
         $resource['access'] = [];
@@ -263,7 +339,7 @@ class ResourceReadService
         }
 
         // If resource is public or user is DAC CLI, give read access
-        if ($resource['status_type_id'] === 'PUB' || $auth->isDacCli()) {
+        if ($resource['status_type_id'] === 'PUB' || $resource['status_type_id'] === 'REV' || $resource['status_type_id'] === 'RES' || $auth->isDacCli()) {
             $resource['access'] = ['permissions' => 'read'];
         }
 
@@ -299,7 +375,6 @@ class ResourceReadService
             "SELECT domain_type_name AS label, domain_type_id AS resource_type_id FROM relationship_rule_view WHERE range_type_name = %s",
             $resource_type
         );
-
         return $resource;
     }
 }

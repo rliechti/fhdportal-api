@@ -3,6 +3,7 @@
 namespace App\Service\Resource;
 
 use App\Service\Auth\Keycloak;
+use App\Service\Utility\GeneralHelperService;
 use Exception;
 use MeekroDB;
 use PhpOffice\PhpSpreadsheet\Cell\DataValidation;
@@ -11,7 +12,6 @@ use PhpOffice\PhpSpreadsheet\Style\Alignment;
 use PhpOffice\PhpSpreadsheet\Style\Border;
 use PhpOffice\PhpSpreadsheet\Style\Color;
 use PhpOffice\PhpSpreadsheet\Writer\Xlsx;
-use Symfony\Component\HttpFoundation\JsonResponse;
 
 /**
  * Service for managing resource templates and downloads.
@@ -19,10 +19,12 @@ use Symfony\Component\HttpFoundation\JsonResponse;
 final class ResourceTemplateService
 {
     private MeekroDB $db;
+    private GeneralHelperService $helper;
 
-    public function __construct(MeekroDB $db)
+    public function __construct(MeekroDB $db, GeneralHelperService $helper)
     {
         $this->db = $db;
+        $this->helper = $helper;
     }
 
     /**
@@ -59,7 +61,7 @@ final class ResourceTemplateService
 
         // Prepare template directory and filepath
         $template_dir = $project_dir . '/data/template/';
-        $this->createDirectory($template_dir, true);
+        $this->helper->createDirectory($template_dir, true);
         $filepath = $template_dir . "/" . $filename;
 
         // Retrieve JSON schema properties for resource type
@@ -280,22 +282,5 @@ final class ResourceTemplateService
         $writer->save($filepath);
 
         return $filepath;
-    }
-
-    private function createDirectory(string $destination, bool $writable = false): ?JsonResponse
-    {
-        if (!file_exists($destination)) {
-            mkdir($destination, 0770, true);
-            if (!file_exists($destination)) {
-                return new JsonResponse($destination . " does not exist", 400);
-            }
-        }
-        if ($writable && !is_writable($destination)) {
-            chmod($destination, 0777);
-            if (!is_writable($destination)) {
-                return new JsonResponse($destination . " does not exist", 400);
-            }
-        }
-        return null;
     }
 }

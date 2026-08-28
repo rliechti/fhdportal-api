@@ -42,9 +42,10 @@ class ResourceImportService
      * @param string $filePath Path to import file
      * @param string $email User email
      * @param string $resourceType Resource type name (for non-ZIP)
+     * @param callable|null $onProgress Called as ($phase, $current, $total, $resourceType) to report progress
      * @return array ['success' => bool, 'message' => string, 'resource_count' => int|null, 'resources' => array]
      */
-    public function importResource(string $studyId, string $filePath, string $email, string $resourceType, int $userId): array
+    public function importResource(string $studyId, string $filePath, string $email, string $resourceType, int $userId, ?callable $onProgress = null): array
     {
         $extension = strtolower(pathinfo($filePath, PATHINFO_EXTENSION));
         $mimeType = mime_content_type($filePath);
@@ -58,6 +59,9 @@ class ResourceImportService
             $tsvPath = ($extension !== 'tsv' && $extension !== 'json') ? $this->fileHelper->convertXlsxToTsv($filePath, $resourceType) : $filePath;
             $tempFile = $tsvPath !== $filePath;
             try {
+                if ($onProgress) {
+                    $onProgress('validating', 0, 0, $resourceType);
+                }
                 $validationResult = $this->validation->validateFile($tsvPath, $resourceType, $userId, $studyId);
                 if (!$validationResult['success']) {
                     return $validationResult;
@@ -66,7 +70,12 @@ class ResourceImportService
                 if (empty($resourceData)) {
                     return ['success' => false, 'message' => 'No valid data found in file', 'resource_count' => 0];
                 }
-				return $this->resourceEdit->insertResourceData($resourceData, $resourceType, $studyId);
+                $rowProgress = $onProgress
+                    ? function (int $current, int $total, string $rt) use ($onProgress) {
+                        $onProgress('importing', $current, $total, $rt);
+                    }
+                    : null;
+				return $this->resourceEdit->insertResourceData($resourceData, $resourceType, $studyId, $rowProgress);
 			}
             finally {
                 if ($tempFile && file_exists($tsvPath)) {
@@ -77,7 +86,7 @@ class ResourceImportService
 
         // Handle ZIP bundles
         if ($extension === 'zip' || $mimeType === 'application/zip') {
-            return $this->importZipBundle($filePath, $studyId, $userId);
+            return $this->importZipBundle($filePath, $studyId, $userId, $onProgress);
         }
 
         return ['success' => false, 'message' => 'Unsupported file format', 'resource_count' => 0];
@@ -85,9 +94,14 @@ class ResourceImportService
 
     /**
      * Import ZIP submission bundle with ranked resource types.
+     *
+     * @param callable|null $onProgress Called as ($phase, $current, $total, $resourceType) to report progress
      */
-    public function importZipBundle(string $filePath, string $initialStudyId, int $userId): array
+    public function importZipBundle(string $filePath, string $initialStudyId, int $userId, ?callable $onProgress = null): array
     {
+        if ($onProgress) {
+            $onProgress('validating', 0, 0, null);
+        }
         $validationResult = $this->validation->validateFile($filePath, 'SubmissionBundle', $userId, $initialStudyId) ;
 
         if (!$validationResult['success'] || !isset($validationResult['result'])) {
@@ -98,8 +112,19 @@ class ResourceImportService
         $resourceTypeRanks = $this->db->queryFirstColumn(
             'SELECT "name" FROM resource_type WHERE rank IS NOT NULL ORDER BY rank'
         );
+
+        // Pre-compute the total row count across all resource types so progress
+        // reflects the whole bundle rather than resetting per resource type.
+        $totalRows = 0;
+        foreach ($resourceTypeRanks as $rt) {
+            if (isset($validatedResources[$rt]['data'])) {
+                $totalRows += count($validatedResources[$rt]['data']);
+            }
+        }
+
         $outputResources = [];
         $studyId = $initialStudyId;
+        $processedRows = 0;
         foreach ($resourceTypeRanks as $rt) {
             if (!isset($validatedResources[$rt])) {
                 continue;
@@ -114,7 +139,14 @@ class ResourceImportService
             }
 
             $resourceData = array_map(fn($a) => $a['data'] ?? [], $resourceResult['data'] ?? []);
-            $inserted = $this->resourceEdit->insertResourceData($resourceData, $rt, $studyId);
+            $rowsInType = count($resourceData);
+            $rowProgress = $onProgress
+                ? function (int $current, int $total, string $resourceType) use ($onProgress, $processedRows, $totalRows) {
+                    $onProgress('importing', $processedRows + $current, $totalRows, $resourceType);
+                }
+                : null;
+            $inserted = $this->resourceEdit->insertResourceData($resourceData, $rt, $studyId, $rowProgress);
+            $processedRows += $rowsInType;
             $outputResources[$rt] = $inserted;
 
             if ($rt === 'Study') {

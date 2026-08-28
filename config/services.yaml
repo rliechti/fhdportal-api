@@ -13,7 +13,18 @@ parameters:
   app.db.user: '%env(string:POSTGRES_USER)%'
   app.db.pass: '%env(string:POSTGRES_PASSWORD)%'
   app.db.name: '%env(string:POSTGRES_DB)%'
-  app.db.charset: 'utf8mb4'
+  app.db.charset: 'UTF8'
+  app.db.port: '%env(default:app_db_port_default:int:POSTGRES_PORT)%'
+  app_db_port_default: 5432
+  # Defaults to 'prefer' (libpq's own default - matches current behaviour exactly)
+  # rather than 'verify-full', because this deployment's PostgreSQL does not have
+  # TLS enabled yet (`SHOW ssl` = off): defaulting to verify-full here would refuse
+  # every connection until the server side is configured. Set POSTGRES_SSLMODE=verify-full
+  # (plus POSTGRES_SSLROOTCERT) once the server actually enforces TLS - see security audit M-5.
+  app.db.sslmode: '%env(default:app_db_sslmode_default:POSTGRES_SSLMODE)%'
+  app_db_sslmode_default: 'prefer'
+  app.db.sslrootcert: '%env(default:app_db_sslrootcert_default:POSTGRES_SSLROOTCERT)%'
+  app_db_sslrootcert_default: ''
   keycloak.url: '%env(KEYCLOAK_URL)%'
   keycloak.realm: '%env(KEYCLOAK_REALM)%'
   keycloak.client_id: '%env(KEYCLOAK_CLIENT_ID)%'
@@ -51,6 +62,9 @@ services:
       - '%app.db.pass%'
       - '%app.db.name%'
       - '%app.db.charset%'
+      - '%app.db.port%'
+      - '%app.db.sslmode%'
+      - '%app.db.sslrootcert%'
 
   # RabbitMQ toggle: set RABBITMQ_ENABLED=false to use the no-op implementation.
   App\Service\RabbitMq\RabbitMqInterface:
@@ -58,3 +72,18 @@ services:
     arguments:
       - '%env(default:rabbitmq_enabled_default:RABBITMQ_ENABLED)%'
       - '@MeekroDB'
+  App\EventListener\ExceptionListener:
+    tags:
+      - { name: kernel.event_listener, event: kernel.exception }
+  App\EventListener\ConfigSanityListener:
+    tags:
+      - { name: kernel.event_listener, event: kernel.request, priority: 256 }
+  App\EventListener\RateLimitListener:
+    arguments:
+      $anonymousLimiter: '@limiter.anonymous'
+      $authenticatedLimiter: '@limiter.authenticated'
+      $expensiveLimiter: '@limiter.expensive'
+    tags:
+      # Below the router (priority 32) so _route is already resolved; well before
+      # any controller work happens.
+      - { name: kernel.event_listener, event: kernel.request, priority: 8 }

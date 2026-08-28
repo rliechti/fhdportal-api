@@ -6,9 +6,11 @@ use App\Service\Auth\Keycloak;
 use App\Service\Auth\KeycloakService;
 use App\Service\Validation\ValidationService;
 use OpenApi\Attributes as OA;
+use Psr\Log\LoggerInterface;
 use Symfony\Bundle\FrameworkBundle\Controller\AbstractController;
 use Symfony\Component\HttpFoundation\JsonResponse;
 use Symfony\Component\HttpFoundation\Request;
+use Symfony\Component\HttpKernel\Exception\HttpExceptionInterface;
 use Symfony\Component\Routing\Attribute\Route;
 
 #[Route('/api')]
@@ -16,11 +18,28 @@ class ValidationController extends AbstractController
 {
     private ValidationService $validationService;
     protected KeycloakService $keycloak;
-
     public function __construct(
         ValidationService $validationService
     ) {
         $this->validationService = $validationService;
+    }
+
+    /**
+     * See SubmissionController::rethrowSafely() for the rationale (security audit H-8).
+     * This controller returns arrays/JsonResponse rather than always throwing, so this
+     * variant hands back a sanitized message string instead.
+     */
+    private function safeErrorMessage(\Throwable $e, LoggerInterface $logger, string $genericMessage): string
+    {
+        if ($e instanceof HttpExceptionInterface) {
+            return $e->getMessage();
+        }
+        $code = $e->getCode();
+        if ($code >= 400 && $code < 600) {
+            return $e->getMessage();
+        }
+        $logger->error($genericMessage, ['exception' => $e]);
+        return $genericMessage;
     }
 
     #[Route('/validate', name: 'validate_data', methods: ['POST'])]
@@ -58,9 +77,13 @@ class ValidationController extends AbstractController
             )
         ]
     )]
-    public function validate(Request $request): JsonResponse
+    public function validate(Request $request, Keycloak $auth, LoggerInterface $logger): JsonResponse
     {
         try {
+            if ($auth->isGuest()) {
+                return $this->json(['message' => 'Unauthorized'], 401);
+            }            
+            
             $content = json_decode($request->getContent(), true);
 
             if (json_last_error() !== JSON_ERROR_NONE) {
@@ -129,10 +152,11 @@ class ValidationController extends AbstractController
 
             return new JsonResponse($result);
         } catch (\Exception $e) {
+            $message = $this->safeErrorMessage($e, $logger, 'Validation error occurred');
             return new JsonResponse([
                 'success' => false,
-                'message' => 'Validation error: ' . $e->getMessage(),
-                'errors' => [$e->getMessage()]
+                'message' => $message,
+                'errors' => [$message]
             ], 500);
         }
     }
@@ -178,12 +202,19 @@ class ValidationController extends AbstractController
             )
         ]
     )]
-    public function validateBundle(Request $request): JsonResponse
+    public function validateBundle(Request $request, Keycloak $auth, LoggerInterface $logger): JsonResponse
     {
         try {
+            if ($auth->isGuest()) {
+                return $this->json(['message' => 'Unauthorized'], 401);
+            }
+            if (!$auth->hasRole('submitter')) {
+                return $this->json(['message' => 'Forbidden'], 403);
+            }
+
             $uploadedFile = $request->files->get('bundle');
 
-            if (!$uploadedFile) {
+            if (!$uploadedFile || !$uploadedFile->isValid()) {
                 return new JsonResponse([
                     'success' => false,
                     'message' => 'No file uploaded',
@@ -191,8 +222,20 @@ class ValidationController extends AbstractController
                 ], 400);
             }
 
-            $extension = strtolower($uploadedFile->getClientOriginalExtension());
-            if ($extension !== 'zip') {
+            // Bound the input explicitly rather than relying on php.ini alone.
+            if ($uploadedFile->getSize() > 50 * 1024 * 1024) {
+                return new JsonResponse([
+                    'success' => false,
+                    'message' => 'Bundle exceeds 50 MB',
+                    'errors' => ['Uploaded file is too large']
+                ], 413);
+            }
+
+            // Verify actual content, not the client-supplied filename/extension.
+            $finfo = finfo_open(FILEINFO_MIME_TYPE);
+            $mime  = finfo_file($finfo, $uploadedFile->getPathname());
+            finfo_close($finfo);
+            if ($mime !== 'application/zip') {
                 return new JsonResponse([
                     'success' => false,
                     'message' => 'Invalid file type',
@@ -214,10 +257,11 @@ class ValidationController extends AbstractController
 
             return new JsonResponse($result);
         } catch (\Exception $e) {
+            $message = $this->safeErrorMessage($e, $logger, 'Validation error occurred');
             return new JsonResponse([
                 'success' => false,
-                'message' => 'Validation error: ' . $e->getMessage(),
-                'errors' => [$e->getMessage()]
+                'message' => $message,
+                'errors' => [$message]
             ], 500);
         }
     }
@@ -225,7 +269,7 @@ class ValidationController extends AbstractController
     /**
      * Validate delimited data
      */
-    private function validateDelimitedData(string $data, string $resourceType): array
+    private function validateDelimitedData(string $data, string $resourceType, LoggerInterface $logger): array
     {
         try {
             // Detect delimiter
@@ -301,10 +345,11 @@ class ValidationController extends AbstractController
                 'errors' => []
             ];
         } catch (\Exception $e) {
+            $message = $this->safeErrorMessage($e, $logger, 'Error parsing delimited data');
             return [
                 'success' => false,
-                'message' => 'Error parsing delimited data: ' . $e->getMessage(),
-                'errors' => [$e->getMessage()]
+                'message' => $message,
+                'errors' => [$message]
             ];
         }
     }

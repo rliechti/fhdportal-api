@@ -6,7 +6,7 @@ use MeekroDB;
 
 final class UserRoleReadService
 {
-    public function __construct(private readonly MeekroDB $db)
+    public function __construct(private MeekroDB $db)
     {
     }
 

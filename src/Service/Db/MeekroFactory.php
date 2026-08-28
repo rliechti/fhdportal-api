@@ -11,10 +11,22 @@ final class MeekroFactory
         string $user,
         string $password,
         string $database,
-        string $encoding = 'utf8mb4'
+        string $encoding = 'utf8mb4',
+        int $port = 5432,
+        string $sslMode = 'prefer',
+        ?string $sslRootCert = null
     ): MeekroDB {
-        $dsn = 'pgsql:host=' . $host . ';port=5432;dbname=' . $database;
+        // sslmode=prefer (libpq's default when unset) silently falls back to plaintext
+        // if the server doesn't require TLS, and never validates the server certificate
+        // either way. verify-full is the mode that actually guarantees both (security
+        // audit M-5) - it also requires hostssl to be enforced server-side in pg_hba.conf,
+        // since that is the control that actually prevents a plaintext connection.
+        $dsn = sprintf('pgsql:host=%s;port=%d;dbname=%s;sslmode=%s', $host, $port, $database, $sslMode);
+        if ($sslRootCert) {
+            $dsn .= ';sslrootcert=' . $sslRootCert;
+        }
         $db = new MeekroDB($dsn, $user, $password);
+        $db->connect_options = [\PDO::ATTR_PERSISTENT => true];
         $db->encoding = $encoding;
 
         $fn = function ($hash) {
@@ -25,14 +37,13 @@ final class MeekroFactory
             $error = $hash['error']; // error message
             $Exception = $hash['exception']; // this exception will be thrown after hooks run
             throw new \RuntimeException(sprintf(
-                'MeekroDB error: %s (query: %s)',
-                $error ?? 'unknown',
-                $query ?? 'n/a'
+                'MeekroDB error: %s',
+                $error ?? 'unknown'
             ));
 
 
-            error_log("QUERY: $query ($runtime ms)");
-            error_log("ERROR: " . $error);
+            // error_log("QUERY: $query ($runtime ms)");
+            // error_log("ERROR: " . $error);
             return;
         };
 

@@ -4,8 +4,11 @@ namespace App\Service\Auth;
 
 use App\Service\Dac\PolicyService;
 use App\Service\Utility\GeneralHelperService;
+use Firebase\JWT\JWK;
+use Firebase\JWT\JWT;
 use MeekroDB;
-use ReallySimpleJWT\Token;
+use Symfony\Contracts\Cache\CacheInterface;
+use Symfony\Contracts\Cache\ItemInterface;
 
 $KEYCLOAK_SECRET    = $_ENV['KEYCLOAK_SECRET'];
 $KEYCLOAK_REALM     = $_ENV['KEYCLOAK_REALM'];
@@ -31,15 +34,18 @@ class Keycloak
     private $token = [];
     private $error;
     private $isDacMember = false;
+    private $isHelpDeskMember = false;
     private PolicyService $policyService;
     private GeneralHelperService $helper;
     private MeekroDB $db;
+    private CacheInterface $cache;
 
-    public function __construct(PolicyService $policyService, GeneralHelperService $helper, MeekroDB $db)
+    public function __construct(PolicyService $policyService, GeneralHelperService $helper, MeekroDB $db, CacheInterface $cache)
     {
         $this->policyService = $policyService;
         $this->helper = $helper;
         $this->db = $db;
+        $this->cache = $cache;
         $this->authenticate();
     }
 
@@ -62,9 +68,22 @@ class Keycloak
     {
         return !$this->isAuthenticated();
     }
+    /**
+     * Determine if the current user is a admin .
+     *
+     * @return bool
+     */
+    public function isAdmin(): bool
+    {
+        return $this->hasRole('admin-fega');
+    }
 
     /**
-     * Determine if the current user is a dac-cli.
+     * True when the caller is the DAC integration client.
+     *
+     * Authorization is based on the token's authorized-party claim and a realm
+     * role granted in Keycloak - never on preferred_username, which is a profile
+     * attribute and not an authorization claim (security audit H-1).
      *
      * @return bool
      */
@@ -77,7 +96,8 @@ class Keycloak
             return true;
         }
 
-        return $this->token['preferred_username'] == "service-account-dac-cli";
+        return $this->hasRole('dac-cli')
+            && ($this->token['azp'] ?? null) === ($_ENV['KEYCLOAK_DAC_CLIENT_ID'] ?? 'dac-cli');
     }
 
     /**
@@ -155,9 +175,42 @@ class Keycloak
             return;
         }
         try {
-            $user = Token::getPayload($encodedToken);
+            $keys    = JWK::parseKeySet($this->getSigningKeys(), 'RS256');
+            $decoded = JWT::decode($encodedToken, $keys);
+            $user    = json_decode(json_encode($decoded), true);            
+            $expectedIssuer = KEYCLOAK_URL . 'realms/' . KEYCLOAK_REALM;
+            if (($user['iss'] ?? null) !== $expectedIssuer) {
+                throw new \Exception('Unexpected token issuer: ' . ($user['iss'] ?? '(none)'));
+            }
+            // Audience: this API must be a named recipient of the token. Without this,
+            // any token signed by the realm - issued for any other client - is accepted
+            // here too (security audit H-2).
+            $expectedAudience = $_ENV['KEYCLOAK_EXPECTED_AUDIENCE'] ?? KEYCLOAK_CLIENT_ID;
+            $aud = $user['aud'] ?? [];
+            $aud = is_array($aud) ? $aud : [$aud];
+            if (!in_array($expectedAudience, $aud, true)) {
+                throw new \Exception('Token audience does not include this API');
+            }
+
+            // Authorized party: the token must come from a client we trust.
+            $allowedParties = array_filter(explode(',', $_ENV['KEYCLOAK_ALLOWED_AZP'] ?? ''));
+            if ($allowedParties && !in_array($user['azp'] ?? '', $allowedParties, true)) {
+                throw new \Exception('Token authorized party is not allowed');
+            }
+
+            // Required claims must exist before any downstream code reads them.
+            foreach (['sub', 'preferred_username'] as $claim) {
+                if (!isset($user[$claim]) || !is_string($user[$claim])) {
+                    throw new \Exception("Token missing required claim: {$claim}");
+                }
+            }
+
             if (strpos($user['preferred_username'], 'service-account-') === false) {
-                $dbUser = $this->db->queryFirstRow("SELECT * from \"user\" where external_id = %s_preferred_username or email = %s_email", $user);
+                $dbUser = $this->db->queryFirstRow("SELECT * from \"user\" where external_id = %s_preferred_username", $user);
+                // if (!$dbUser){
+                //     $dbUser = $this->db->queryFirstRow("SELECT * from \"user\" where email = %s_email", $user);
+                // }
+                
                 $propertyKeys = array(
                     "sub",
                     "realm_access",
@@ -185,7 +238,7 @@ class Keycloak
                     $this->db->insert('user', $dbUser);
                     $dbUser['id'] = $this->db->insertId();
                 } elseif ($dbUser['email'] != $user['email'] || $dbUser['external_id'] != $user['preferred_username'] || $dbUser['properties'] != json_encode($properties)) {
-                    $this->db->update("user", array("email" => $user['email'], "properties" => json_encode($properties), "external_id" => $user['preferred_username']), "id = %s_id", $dbUser);
+                    $this->db->update("user", array("email" => $user['email'], "properties" => json_encode($properties), "external_id" => $user['preferred_username']), "id = %s", $dbUser['id']);
                 }
                 $this->id = +$dbUser['id'];
             }
@@ -194,6 +247,34 @@ class Keycloak
             $this->error = $e->getMessage();
             $this->token = [];
         }
+    }
+
+    /**
+     * Returns Keycloak's realm signing keys (JWKS), cached to avoid
+     * fetching them on every request.
+     */
+    private function getSigningKeys(): array
+    {
+        return $this->cache->get('keycloak_jwks_' . KEYCLOAK_REALM, function (ItemInterface $item) {
+            $item->expiresAfter(3600);
+            return $this->fetchJwks();
+        });
+    }
+
+    private function fetchJwks(): array
+    {
+        $ch = curl_init(KEYCLOAK_URL . 'realms/' . KEYCLOAK_REALM . '/protocol/openid-connect/certs');
+        curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+        curl_setopt($ch, CURLOPT_TIMEOUT, 5);
+        $result = curl_exec($ch);
+        if ($result === false) {
+            throw new \Exception('Unable to fetch Keycloak signing keys: ' . curl_error($ch));
+        }
+        $jwks = json_decode($result, true);
+        if (!isset($jwks['keys'])) {
+            throw new \Exception('Invalid JWKS response from Keycloak');
+        }
+        return $jwks;
     }
 
     private function getAuthorizationHeader(): ?string
@@ -205,6 +286,10 @@ class Keycloak
             $header = trim($_SERVER["HTTP_AUTHORIZATION"]);
         }
         // Check for Authorization header via Apache rewrite
+        #elseif (isset($_SERVER['REDIRECT_HTTP_AUTHORIZATION'])) {
+        #    $header = trim($_SERVER['REDIRECT_HTTP_AUTHORIZATION']);
+        #}
+        // Check for Authorization header via Apache environment
         elseif (isset($_ENV['HTTP_AUTHORIZATION'])) {
             $header = trim($_ENV["HTTP_AUTHORIZATION"]);
         }
@@ -219,15 +304,15 @@ class Keycloak
     public function getBearerToken(): ?string
     {
         $header = $this->getAuthorizationHeader();
-        if (!empty($header)) {
-            if (preg_match('/Bearer\s(\S+)/', $header, $matches)) {
-                return $matches[1];
-            }
-            if (!preg_match('/^Bearer\s/', $header)) {
-                return trim($header);
-            }
+        if ($header === null || $header === '') {
+            return null;
         }
-        return null;
+        // Anchored, exact-form match only: "Bearer <token>". The previous unanchored
+        // regex matched Bearer anywhere in a malformed composite header, and a header
+        // that didn't start with "Bearer " at all was passed through verbatim as a
+        // token - JWT::decode() would still reject anything invalid, but neither
+        // behaviour was intended (security audit M-15).
+        return preg_match('/^Bearer\s+([A-Za-z0-9\-._~+\/]+=*)$/', $header, $m) ? $m[1] : null;
     }
 
     public function checkDacMember(string $datasetId): bool
@@ -235,6 +320,9 @@ class Keycloak
         if (!$datasetId) {
             $this->isDacMember = false;
             return false;
+        }
+        if ($this->isDacCli()) {
+            return true;
         }
         $field = $this->helper->checkUuid($datasetId) ? "id" : "properties->>'public_id'::text";
         $policyId = $this->db->queryFirstField("SELECT resource.properties->>'policy_id' as policy_id from resource where " . $field . " = %s", $datasetId);

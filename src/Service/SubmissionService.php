@@ -7,6 +7,7 @@ use App\Service\Auth\KeycloakService;
 use App\Service\RabbitMq\RabbitMqInterface;
 use App\Service\Dac\PolicyService;
 use App\Service\Resource\ResourceRelationshipService;
+use Psr\Log\LoggerInterface;
 use Ramsey\Uuid\Uuid;
 use MeekroDB;
 
@@ -19,6 +20,7 @@ class SubmissionService
         private PolicyService $policy,
         private KeycloakService $keycloak,
 	    ResourceRelationshipService $relationshipService,
+        private LoggerInterface $logger,
     ) {
 	    $this->relationshipService = $relationshipService;
     }
@@ -42,12 +44,11 @@ class SubmissionService
              WHERE $field = %s",
             $studyId
         );
-
+        
         foreach ($datasets as $d) {
             if (!$d['policy_id']) {
                 continue;
             }
-
             $result = $this->policy->registerDatasetPolicy($auth, $d['dataset_id'], $d['policy_id']);
 
             if (!$result['success']) {
@@ -98,27 +99,7 @@ class SubmissionService
             ]);
 
 
-			$this->relationshipService->updateRelationshipStatus($d['dataset_id'],$d['policy_id'],false,$user['id']);
-            // $relationshipId = $this->db->queryFirstField(
- //                "SELECT id
- //                 FROM relationship
- //                 WHERE domain_resource_id = %s_dataset_id
- //                   AND range_resource_id = %s_policy_id",
- //                $d
- //            );
- //
- //            if ($relationshipId) {
- //                $this->db->update('relationship', ['is_active' => false], 'id = %s', $relationshipId);
- //
- //                $relLogId = Uuid::uuid4()->toString();
- //
- //                $this->db->insert('relationship_log', [
- //                    'id'              => $relLogId,
- //                    'relationship_id' => $relationshipId,
- //                    'user_id'         => $user['id'],
- //                    'action_type_id'  => 'DEL',
- //                ]);
- //            }
+			$this->relationshipService->updateRelationshipStatus($d['dataset_id'],$d['policy_id'],'DEL',false,$user['id']);
 
             $policy = $this->policy->getPolicy($auth, $d['policy_id'], true);
             $this->syncDacMembersAcl($policy, $d['study_id'], $grant = false);
@@ -132,11 +113,12 @@ class SubmissionService
         }
 
         foreach ($policy['dac']['members'] as $member) {
-            if (empty($member['email'])) {
+            if (empty($member['email']) || !filter_var($member['email'], FILTER_VALIDATE_EMAIL)) {
+                $this->logger->warning('Skipping DAC member with invalid email', ['dac_member' => $member]);
                 continue;
             }
 
-            $users = $this->keycloak->getUsers('', 'email=' . $member['email']);
+            $users = $this->keycloak->findUsersByEmail($member['email']);
 
             foreach ($users as $u) {
                 $userId = $this->db->queryFirstField(

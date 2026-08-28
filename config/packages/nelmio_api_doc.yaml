@@ -19,5 +19,8 @@ nelmio_api_doc:
             - openId: []
     areas:
         default:
-            path_patterns: ['^/((?!_error)(?!users)(?!roles).)*$']
+            # Excluding /users and /roles here didn't stop those routes from working -
+            # it only left the published spec silently incomplete (security audit M-9).
+            # If the documentation must stay public, it should at least be honest.
+            path_patterns: ['^/(?!_error).*$']
             host_patterns: []

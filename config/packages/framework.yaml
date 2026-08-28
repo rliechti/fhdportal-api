@@ -8,8 +8,14 @@ framework:
     #csrf_protection: true
 
     # Note that the session will be started ONLY if you read or write from it.
-    session: true
-
+    session:
+        handler_id: null
+        cookie_secure: auto    # HTTPS only in production
+        cookie_httponly: true  # No JavaScript access
+        cookie_samesite: lax   # CSRF protection
+        gc_maxlifetime: 3600   # 1 hour session timeout
+        cookie_lifetime: 0     # Session cookie (expires on browser close)
+        name: FEGA_SESSION     # Custom name
     #esi: true
     #fragments: true
 

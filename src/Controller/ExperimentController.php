@@ -4,6 +4,7 @@ namespace App\Controller;
 
 use App\Service\Auth\Keycloak;
 use OpenApi\Attributes as OA;
+use Psr\Log\LoggerInterface;
 use Symfony\Component\HttpFoundation\JsonResponse;
 use Symfony\Component\HttpFoundation\Request;
 use Symfony\Component\Routing\Attribute\Route;
@@ -46,7 +47,7 @@ class ExperimentController extends ResourceController
     )]
     public function getStudyExperiments(Keycloak $auth, string $study_id): JsonResponse
     {
-        return $this->listResources($auth, $study_id);
+        return $this->listResources($auth, $study_id, 'edit');
     }
 
     #[Route('/submissions/{study_id}/experiments', name: 'post_experiment', methods: ['POST'])]
@@ -76,9 +77,9 @@ class ExperimentController extends ResourceController
             new OA\Response(response: 400, description: 'Invalid input')
         ]
     )]
-    public function postExperiment(Request $request, Keycloak $auth, string $study_id): JsonResponse
+    public function postExperiment(Request $request, Keycloak $auth, string $study_id, LoggerInterface $logger): JsonResponse
     {
-        return $this->postResource($request, $auth, $study_id);
+        return $this->postResource($request, $auth, $study_id, $logger);
     }
 
     #[Route('/submissions/{study_id}/experiments/{experiment_id}', name: 'put_experiment', methods: ['PUT'])]
@@ -114,9 +115,9 @@ class ExperimentController extends ResourceController
             new OA\Response(response: 400, description: 'Invalid input')
         ]
     )]
-    public function putExperiment(Request $request, Keycloak $auth, string $study_id, string $experiment_id): JsonResponse
+    public function putExperiment(Request $request, Keycloak $auth, string $study_id, string $experiment_id, LoggerInterface $logger): JsonResponse
     {
-        return $this->putResource($request, $auth, $study_id, $experiment_id);
+        return $this->putResource($request, $auth, $study_id, $experiment_id, $logger);
     }
 
     #[Route('/submissions/{study_id}/experiments/{experiment_id}', name: 'delete_experiment', methods: ['DELETE'])]

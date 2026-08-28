@@ -4,6 +4,7 @@ namespace App\Controller;
 
 use App\Service\Auth\Keycloak;
 use OpenApi\Attributes as OA;
+use Psr\Log\LoggerInterface;
 use Symfony\Component\HttpFoundation\JsonResponse;
 use Symfony\Component\HttpFoundation\Request;
 use Symfony\Component\Routing\Attribute\Route;
@@ -46,7 +47,7 @@ class SampleController extends ResourceController
     )]
     public function getStudySamples(Keycloak $auth, string $study_id): JsonResponse
     {
-        return $this->listResources($auth, $study_id);
+        return $this->listResources($auth, $study_id, 'edit');
     }
 
     #[Route('/submissions/{study_id}/samples', name: 'post_sample', methods: ['POST'])]
@@ -76,9 +77,9 @@ class SampleController extends ResourceController
             new OA\Response(response: 400, description: 'Invalid input')
         ]
     )]
-    public function postSample(Request $request, Keycloak $auth, string $study_id): JsonResponse
+    public function postSample(Request $request, Keycloak $auth, string $study_id, LoggerInterface $logger): JsonResponse
     {
-        return $this->postResource($request, $auth, $study_id);
+        return $this->postResource($request, $auth, $study_id, $logger);
     }
 
     #[Route('/submissions/{study_id}/samples/{sample_id}', name: 'put_sample', methods: ['PUT'])]
@@ -114,9 +115,9 @@ class SampleController extends ResourceController
             new OA\Response(response: 400, description: 'Invalid input')
         ]
     )]
-    public function putSample(Request $request, Keycloak $auth, string $study_id, string $sample_id): JsonResponse
+    public function putSample(Request $request, Keycloak $auth, string $study_id, string $sample_id, LoggerInterface $logger): JsonResponse
     {
-        return $this->putResource($request, $auth, $study_id, $sample_id);
+        return $this->putResource($request, $auth, $study_id, $sample_id, $logger);
     }
 
     #[Route('/submissions/{study_id}/samples/{sample_id}', name: 'delete_sample', methods: ['DELETE'])]

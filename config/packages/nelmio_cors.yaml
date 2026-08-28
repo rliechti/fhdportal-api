@@ -1,10 +1,12 @@
 nelmio_cors:
     defaults:
+        # CORS_ALLOW_ORIGIN is matched as a regex: it MUST be anchored (^...$),
+        # otherwise e.g. 'fega\.swiss' would also match 'fega.swiss.evil.com'.
         origin_regex: true
         allow_origin: []  # Empty by default
         allow_methods: ['GET', 'OPTIONS', 'POST', 'PUT', 'PATCH', 'DELETE']
-        allow_headers: ['*']
-        expose_headers: ['Link']
+        allow_headers: ['Authorization', 'Content-Type', 'Accept', 'X-Access-Token','X-Forwarded-Prefix']
+        expose_headers: ['Link', 'Content-Disposition']
         max_age: 3600
 
     paths:

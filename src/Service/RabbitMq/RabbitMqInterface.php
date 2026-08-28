@@ -10,5 +10,9 @@ interface RabbitMqInterface
 
     public function releaseDataset(string $dataset_id, string $email, string $timestamp): void;
 
-    public function permissionDataset(array $params): array;
+    public function requestDownload(array $params): array;
+
+    public function revokeDownload(array $params): array;
+
+    public function refreshRequestTokens(string $correlation_id, string $email): void;
 }

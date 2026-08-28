@@ -4,11 +4,12 @@ namespace App\Controller;
 
 use App\Service\Auth\Keycloak;
 use OpenApi\Attributes as OA;
+use Psr\Log\LoggerInterface;
 use Symfony\Component\HttpFoundation\JsonResponse;
 use Symfony\Component\HttpFoundation\Request;
 use Symfony\Component\Routing\Attribute\Route;
 use Symfony\Component\HttpFoundation\BinaryFileResponse;
-
+use App\Service\Utility\GeneralHelperService;
 #[Route('/api')]
 class DatasetController extends ResourceController
 {
@@ -24,40 +25,38 @@ class DatasetController extends ResourceController
         return 'datasets';
     }
 
-    public function listResources(Keycloak $auth, ?string $studyId = null): JsonResponse
+    public function listResources(Keycloak $auth, ?string $studyId = null, ?string $permission = 'read'): JsonResponse
     {
-        $parentResponse = parent::listResources($auth, $studyId);
+        $parentResponse = parent::listResources($auth, $studyId, $permission);
         $datasets = json_decode($parentResponse->getContent(), true);
-
         foreach ($datasets as $idx => $dataset) {
+           
+           $policy = array();           
+           $policy = $this->dac->getDatasetPolicy($auth, $dataset['id']);
 
-            $policy = array();
-            $policy = $this->dac->getDatasetPolicy($auth, $dataset['id']);
-
-
-
-            foreach ($policy as $key => $value) {
-                $datasets[$idx]['policy_' . $key] = $value;
-            }
-
-            if ((!isset($datasets[$idx]['policy_id']) || !$datasets[$idx]['policy_id'])
-                && isset($datasets[$idx]['properties']['policy_id'])
-                && $datasets[$idx]['properties']['policy_id']
-            ) {
-                $datasets[$idx]['policy_id'] = $datasets[$idx]['properties']['policy_id'];
-                $datasets[$idx]['policy_status'] = 'draft';
-            }
+           if ($policy['status'] == 'success'){
+               foreach ($policy['policy'] as $key => $value) {
+                   $datasets[$idx]['policy_' . $key] = $value;
+               }
+           }
+           if ((!isset($datasets[$idx]['policy_id']) || !$datasets[$idx]['policy_id']) 
+               && isset($datasets[$idx]['properties']['policy_id']) 
+               && $datasets[$idx]['properties']['policy_id']
+           ) {
+               $datasets[$idx]['policy_id'] = $datasets[$idx]['properties']['policy_id'];
+               $datasets[$idx]['policy_status'] = 'draft';
+           }                          
         }
 
         $parentResponse->setData($datasets);
         return $parentResponse;
     }
 
-    public function putResource(Request $request, Keycloak $auth, string $study_id, string $dataset_id): JsonResponse
+    public function putResource(Request $request, Keycloak $auth, string $study_id, string $dataset_id, LoggerInterface $logger): JsonResponse
     {
-        $parentResponse = parent::putResource($request, $auth, $study_id, $dataset_id);
+        $parentResponse = parent::putResource($request, $auth, $study_id, $dataset_id, $logger);
         $dataset = json_decode($parentResponse->getContent(), true);
-
+        
         $policyRequest = array("status" => null);
         $policyRequest = $this->dac->getDatasetPolicy($auth, $dataset_id);
         if ($policyRequest['status'] == 'success') {
@@ -72,8 +71,8 @@ class DatasetController extends ResourceController
             }
         }
 
-        if ((!isset($dataset['policy_id']) || !$dataset['policy_id'])
-            && isset($dataset['properties']->policy_id)
+        if ((!isset($dataset['policy_id']) || !$dataset['policy_id']) 
+            && isset($dataset['properties']->policy_id) 
             && $dataset['properties']->policy_id
         ) {
             $dataset['policy_id'] = $dataset['properties']->policy_id;
@@ -102,15 +101,21 @@ class DatasetController extends ResourceController
     )]
     public function getDatasets(Request $request, Keycloak $auth): JsonResponse
     {
-        $datasets = $this->resourceRead->listResources($auth, 'Dataset', null, 'read', 'published');
-        $datasets = array_map(function ($d) {
+        $isDacCli = $auth->isDacCli();
+        $statusTypes = 'published,revised,re-submitted';
+        if ($isDacCli){
+            $statusTypes .= ",approved";
+        }
+        $datasets = $this->resourceRead->listResources($auth, 'Dataset', null, 'read', $statusTypes);
+        // error_log(json_encode($datasets[0]));
+        $datasets = array_map(function ($d) use ($isDacCli) {
             $nb_runs = 0;
             foreach($d['properties'] as $k => $v){
                 if (strpos($k,'run_public_ids') !== false){
                     $nb_runs += count($v);
                 }
             }
-            return [
+            $return = [                
                 'public_id' => $d['properties']['public_id'],
                 'title' => $d['properties']['title'],
                 'description' => $d['properties']['description'],
@@ -118,7 +123,24 @@ class DatasetController extends ResourceController
                 'nb_samples' => $nb_runs,
                 'request' => isset($d['request']) ? $d['request'] : null,
             ];
-        }, (array) $datasets);
+            if ($isDacCli) {
+                $return['id'] = $d['id'];
+                $return['study_id'] = $d['study_id'];
+                $return['study_title'] = $d['study_title'];
+                $return['status'] = $d['status'];
+                $return['submitter'] = array();
+                foreach($d as $k => $v){
+                    if (strpos($k,'creator_') !== FALSE){
+                        $sub_key = str_replace("creator_","",$k);
+                        if ($sub_key != 'id'){
+                            $return['submitter'][$sub_key] = $v;	    
+                        }
+			
+                    }
+                }
+            }
+            return $return;
+        }, (array) $datasets);            
     
         $content = json_encode($datasets);
         return new JsonResponse($content, json: true);
@@ -142,7 +164,7 @@ class DatasetController extends ResourceController
     )]
     public function getStudyDatasets(Keycloak $auth, string $study_id): JsonResponse
     {
-        return $this->listResources($auth, $study_id);
+        return $this->listResources($auth, $study_id,'edit');
     }
 
     #[Route('/datasets/{dataset_id}', name: 'get_dataset', methods: ['GET'])]
@@ -167,9 +189,9 @@ class DatasetController extends ResourceController
         $user = $auth->getDetails();
 
         if ($isDacCli) {
-            $resource = $this->resourceRead->getResource($auth, 'Dataset', $dataset_id, 'read', 'submitted');
+            $resource = $this->resourceRead->getResource($auth, 'Dataset', $dataset_id, 'read', 'submitted,re-submitted');
         } else {
-            $resource = $this->resourceRead->getResource($auth, 'Dataset', $dataset_id, 'read', 'published');
+            $resource = $this->resourceRead->getResource($auth, 'Dataset', $dataset_id, 'read', 'published,revised,re-submitted');
         }
 
         if (isset($resource['error'])) {
@@ -177,6 +199,9 @@ class DatasetController extends ResourceController
         }
 
         $dataset = $resource['properties'];
+        if (isset($dataset['extra_attributes'])){
+            unset($dataset['extra_attributes']);
+        }
         $dataset['study_public_id'] = $resource['study_public_id'];
         $status = $isDacCli ? 'DRA' : 'PUB';
         $dataset['files'] = $this->getDatasetFiles($dataset_id, $status);
@@ -270,9 +295,9 @@ class DatasetController extends ResourceController
             new OA\Response(response: 400, description: 'Invalid input')
         ]
     )]
-    public function postDataset(Request $request, Keycloak $auth, string $study_id): JsonResponse
+    public function postDataset(Request $request, Keycloak $auth, string $study_id, LoggerInterface $logger): JsonResponse
     {
-        return $this->postResource($request, $auth, $study_id);
+        return $this->postResource($request, $auth, $study_id, $logger);
     }
 
     #[Route('/submissions/{study_id}/datasets/{dataset_id}', name: 'put_dataset', methods: ['PUT'])]
@@ -298,10 +323,55 @@ class DatasetController extends ResourceController
             new OA\Response(response: 400, description: 'Invalid input')
         ]
     )]
-    public function putDataset(Request $request, Keycloak $auth, string $study_id, string $dataset_id): JsonResponse
+    public function putDataset(Request $request, Keycloak $auth, string $study_id, string $dataset_id, LoggerInterface $logger): JsonResponse
     {
-        return $this->putResource($request, $auth, $study_id, $dataset_id);
+        return $this->putResource($request, $auth, $study_id, $dataset_id, $logger);
     }
+
+    #[Route('/submissions/{study_id}/datasets/{dataset_id}', name: 'patch_dataset', methods: ['PATCH'])]
+    #[OA\Patch(
+        path: '/api/submissions/{study_id}/datasets/{dataset_id}',
+        summary: 'Patch dataset status',
+        tags: ['Datasets'],
+        parameters: [
+            new OA\Parameter(name: 'study_id', in: 'path', required: true, schema: new OA\Schema(type: 'string')),
+            new OA\Parameter(name: 'dataset_id', in: 'path', required: true, schema: new OA\Schema(type: 'string'))
+        ],
+        requestBody: new OA\RequestBody(
+            required: true,
+            content: new OA\JsonContent(type: 'object')
+        ),
+        responses: [
+            new OA\Response(response: 204, description: 'Status updated successfully'),
+            new OA\Response(response: 401, description: 'Unauthorized'),
+            new OA\Response(response: 400, description: 'Invalid input')
+        ]
+    )]
+    public function patchDataset(
+        Request $request,
+        Keycloak $auth,
+        GeneralHelperService $helper,
+        string $study_id,
+        string $dataset_id,
+        LoggerInterface $logger
+    ): JsonResponse {
+        if ($auth->isGuest()) {
+            return $this->json(['message' => 'Unauthorized'], 401);
+        }
+
+        $user = $auth->getDetails();
+        $patch = json_decode($request->getContent(), true, flags: JSON_THROW_ON_ERROR);
+        $field = $helper->checkUuid($dataset_id) ? 'dataset_id' : 'dataset_public_id';
+
+        try {
+            $this->resourceEdit->patchResource($dataset_id, $patch, $auth);
+            return $this->json(null, 204);
+        } catch (\Throwable $e) {
+            $this->rethrowSafely($e, $logger, 'Unable to update dataset status');
+        }
+    }
+
+
 
     #[Route('/submissions/{study_id}/datasets/{dataset_id}', name: 'delete_dataset', methods: ['DELETE'])]
     #[OA\Delete(
@@ -360,16 +430,16 @@ class DatasetController extends ResourceController
      */
     private function getDatasetFiles(string $datasetPublicId, string $status): array
     {
+        $statuses = explode(",",$status);
         $files = $this->db->queryFirstColumn(
             "SELECT sda_files.properties FROM dataset_view 
              inner join relationship on dataset_view.id = relationship.range_resource_id 
              inner join relationship as sda_relationship on relationship.domain_resource_id = sda_relationship.range_resource_id 
-             inner join resource as sda_files on sda_files.id = sda_relationship.domain_resource_id and sda_files.status_type_id = %s_status 
+             inner join resource as sda_files on sda_files.id = sda_relationship.domain_resource_id and sda_files.status_type_id in %ls_status 
              inner join resource_type as sda_file_type on sda_files.resource_type_id = sda_file_type.id and sda_file_type.name = 'SdaFile' 
-             WHERE dataset_view.status_type_id = %s_status and dataset_view.public_id = %s_id;",
-            ['id' => $datasetPublicId, 'status' => $status]
+             WHERE dataset_view.status_type_id in %ls_status and dataset_view.public_id = %s_id;",
+            ['id' => $datasetPublicId, 'status' => $statuses]
         );
-
         if (!is_array($files)) {
             return [];
         }

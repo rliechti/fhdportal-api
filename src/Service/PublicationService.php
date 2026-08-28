@@ -6,35 +6,77 @@ use Exception;
 use Ramsey\Uuid\Uuid;
 use MeekroDB;
 use App\Service\JsonSchema\Validator;
+use Symfony\Contracts\Cache\CacheInterface;
+use Symfony\Contracts\Cache\ItemInterface;
+use Symfony\Contracts\HttpClient\HttpClientInterface;
 
 class PublicationService
 {
     private MeekroDB $db;
     private Validator $validator;
     private const PUBMED_EFETCH_URL = 'https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi';
+    private const PMID_PATTERN = '/^\d{1,9}$/';
+    private const MAX_IDS = 50;
 
-    public function __construct(MeekroDB $db, Validator $validator)
-    {
+    public function __construct(
+        MeekroDB $db,
+        Validator $validator,
+        private HttpClientInterface $httpClient,
+        private CacheInterface $cache
+    ) {
         $this->db = $db;
         $this->validator = $validator;
     }
 
-
+    /**
+     * PMIDs are validated against a strict pattern before ever reaching the outbound
+     * request (no query-parameter injection into the eutils URL), the batch is capped,
+     * and results are cached since PubMed records are effectively immutable - a repeated
+     * request for the same PMID never has to leave this process again (security audit M-10).
+     */
     public function fetchPubmeds(array|string $pmids): array
     {
-        if (is_array($pmids)) {
-            $pmids = implode(',', $pmids);
+        $ids = is_array($pmids) ? $pmids : explode(',', $pmids);
+        $ids = array_values(array_unique(array_filter(
+            array_map('trim', $ids),
+            fn ($id) => (bool) preg_match(self::PMID_PATTERN, (string) $id)
+        )));
+
+        if (!$ids) {
+            return [];
+        }
+        if (count($ids) > self::MAX_IDS) {
+            throw new Exception('Too many PubMed identifiers requested (max ' . self::MAX_IDS . ')', 400);
         }
 
-        $pubmeds = [];
-        $url = sprintf('%s?db=pubmed&id=%s&retmode=xml', self::PUBMED_EFETCH_URL, $pmids);
-        $response = file_get_contents($url);
+        sort($ids);
+        $cacheKey = 'pubmed_batch_' . md5(implode(',', $ids));
 
-        if (!$response) {
+        return $this->cache->get($cacheKey, function (ItemInterface $item) use ($ids) {
+            $item->expiresAfter(86400);
+            return $this->doFetchPubmeds($ids);
+        });
+    }
+
+    private function doFetchPubmeds(array $ids): array
+    {
+        $pubmeds = [];
+
+        try {
+            $response = $this->httpClient->request('GET', self::PUBMED_EFETCH_URL, [
+                'query' => ['db' => 'pubmed', 'id' => implode(',', $ids), 'retmode' => 'xml'],
+                'timeout' => 5,
+                'max_duration' => 10,
+            ]);
+            if ($response->getStatusCode() !== 200) {
+                return $pubmeds;
+            }
+            $content = $response->getContent();
+        } catch (\Throwable $e) {
             return $pubmeds;
         }
 
-        $xml = simplexml_load_string($response);
+        $xml = simplexml_load_string($content, null, LIBXML_NONET | LIBXML_NOENT);
         if (!$xml) {
             return $pubmeds;
         }

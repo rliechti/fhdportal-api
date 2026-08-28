@@ -8,7 +8,6 @@ use OpenApi\Attributes as OA;
 use Symfony\Bundle\FrameworkBundle\Controller\AbstractController;
 use Symfony\Component\HttpFoundation\JsonResponse;
 use Symfony\Component\HttpFoundation\Request;
-use Symfony\Component\HttpFoundation\Response;
 use Symfony\Component\Routing\Attribute\Route;
 use Symfony\Component\Serializer\SerializerInterface;
 
@@ -16,11 +15,9 @@ class HomeController extends AbstractController
 {
     public function __construct(private SerializerInterface $serializer) {}
 
-    #[Route('/', name: 'home', methods: ['GET'])]
-    public function index(): Response
-    {
-        return $this->render('home.html.twig');
-    }
+    // The route that used to render a "FEGA API - Debug Tools" page (templates/home.html.twig
+    // + public/js/home.js) was removed: it was an unauthenticated, production-served debug
+    // console (security audit M-9) whose JWT decoder also had a DOM XSS (security audit M-12).
 
     #[Route('/api/status-types', name: 'get_status_types', methods: ['GET'])]
     #[OA\Get(

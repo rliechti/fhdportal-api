@@ -4,7 +4,6 @@ namespace App\Service\Dac;
 
 use App\Service\Auth\Keycloak;
 use App\Service\Dac\DacRequestService;
-use App\Service\RabbitMq\RabbitMqInterface;
 use App\Service\Utility\GeneralHelperService;
 use MeekroDB;
 use Ramsey\Uuid\Uuid;
@@ -19,7 +18,6 @@ class PolicyService
     private MeekroDB $db;
     private MailerInterface $mailer;
     private SerializerInterface $serializer;
-    private RabbitMqInterface $rabbitmq;
     private HttpClientInterface $httpClient;
     private GeneralHelperService $helper;
     private DacRequestService $dac;
@@ -30,7 +28,6 @@ class PolicyService
         MeekroDB $db,
         MailerInterface $mailer,
         SerializerInterface $serializer,
-        RabbitMqInterface $rabbitmq,
         HttpClientInterface $httpClient,
         GeneralHelperService $helper,
         DacRequestService $dac,
@@ -40,16 +37,20 @@ class PolicyService
         $this->db = $db;
         $this->mailer = $mailer;
         $this->serializer = $serializer;
-        // $this->rabbitmq = $rabbitmq;
         $this->httpClient = $httpClient;
         $this->helper = $helper;
         $this->dac = $dac;
         $this->relationshipService = $relationshipService;
         $this->validator = $validator;
-        $this->httpClient->withOptions([
-            'verify_peer' => true,
-            'verify_host' => true,
-        ]);
+        // Always verify. For local development, trust a mounted dev CA bundle
+        // instead of disabling verification (security audit M-4). withOptions()
+        // returns a new client - the previous code discarded it, so this never
+        // actually took effect regardless of environment.
+        $options = ['verify_peer' => true, 'verify_host' => true];
+        if (!empty($_ENV['DEV_CA_BUNDLE'])) {
+            $options['cafile'] = $_ENV['DEV_CA_BUNDLE'];
+        }
+        $this->httpClient = $httpClient->withOptions($options);
     }
 
 
@@ -71,7 +72,6 @@ class PolicyService
                 "status"  => 500
             );
         }
-
         $policy = [
             'id'           => '',
             'submission_id' => '',
@@ -79,7 +79,6 @@ class PolicyService
         ];
 
         $token = $auth->getBearerToken();
-
         $response = $this->httpClient->request(
             'GET',
             $_ENV['DAC_API'] . '/submissions',
@@ -95,11 +94,9 @@ class PolicyService
         );
 
         $statusCode = $response->getStatusCode();
-
         if ($statusCode === 200) {
             $content = $response->toArray();
             $data = isset($content['data']) ? $content['data'] : $content;
-
             foreach ($data as $d) {
                 $d['datasetID'] ??= isset($d['dataset']['id']) ? $d['dataset']['id'] : '';
                 $d['policyID'] ??= isset($d['policy']['id']) ? $d['policy']['id'] : '';
@@ -127,7 +124,6 @@ class PolicyService
         array $dacs
     ): array {
         $token = $auth->getBearerToken();
-
         $response = $this->httpClient->request(
             'GET',
             $_ENV['DAC_API'] . '/policies',
@@ -142,9 +138,18 @@ class PolicyService
                 ],
             ]
         );
-
-        $statusCode = $response->getStatusCode();
-
+        try {
+            $statusCode = $response->getStatusCode();
+        } catch (\Symfony\Contracts\HttpClient\Exception\TransportExceptionInterface $e) {
+            error_log("Transport error (likely 500-related): " . $e->getMessage());
+            $statusCode = 0;
+        } catch (\Symfony\Contracts\HttpClient\Exception\ClientExceptionInterface $e) {
+            error_log("Client error (HTTP 4xx/5xx): " . $e->getMessage());
+            $statusCode = 0;
+        } catch (\Throwable $e) {
+            error_log("Unexpected: " . $e->getMessage());
+            $statusCode = 0;
+        }
         if ($statusCode === 200) {
             $content = $response->toArray();
             $policies = isset($content['data']) ? $content['data'] : $content;
@@ -153,13 +158,13 @@ class PolicyService
                 if (!isset($dacs[$p['dacID']])) {
                     $dacResponse = $this->httpClient->request(
                         'GET',
-                        $_ENV['DAC_API'] . '/dacs/' . $p['dacID'],
+                        $_ENV['DAC_API'] . '/dacs/' . rawurlencode($p['dacID']),
                         [
                             'headers' => [
                                 'Content-Type'  => 'application/json',
                                 'Authorization' => 'Bearer ' . $token,
                             ],
-                        ]
+                        ],
                     );
 
                     $dac = $dacResponse->toArray();
@@ -198,7 +203,7 @@ class PolicyService
 
         $response = $this->httpClient->request(
             'GET',
-            $_ENV['DAC_API'] . '/policies/' . $policyId,
+            $_ENV['DAC_API'] . '/policies/' . rawurlencode($policyId),
             [
                 'headers' => [
                     'Content-Type'  => 'application/json',
@@ -208,22 +213,16 @@ class PolicyService
         );
 
         $statusCode = $response->getStatusCode();
-
         if ($statusCode === 200) {
             $content = $response->toArray();
-
             $policy = [
                 'title'       => $content['title'],
-                'url'         => $content['url'],
                 'dac_id'      => $content['dacID'],
                 'description' => $content['description'],
             ];
-
             $policy['dac'] = $this->dac->getDac($auth, $content['dacID'], $includeMembers);
         } else {
-            error_log($statusCode);
             $content = $response->getContent();
-            error_log($content);
         }
 
         return $policy;
@@ -243,7 +242,6 @@ class PolicyService
 
         if (!$policyPublicId) {
             $dacPolicy = $this->getPolicy($auth, $policyId);
-
             if (isset($dacPolicy['id'])) {
                 unset($dacPolicy['id']);
             }
@@ -303,8 +301,8 @@ class PolicyService
 
 		// TODO : use ResourceRelationshipService
 		$user = $auth->getDetails();
-		$relation_id = $this->relationshipService->createRelationship('Dataset','Policy',$datasetId, $policyId,$user['id'],false);
-		if(!$relation_id){
+		$relationshipId = $this->relationshipService->createRelationship('Dataset','Policy',$datasetId, $policyId,$user['id']);
+		if(!$relationshipId){
 			return array(
 				"success" => false,
 				"error" => 'Error: unable to register the link between Dataset and Policy',
@@ -363,21 +361,19 @@ class PolicyService
 
         $token = $auth->getBearerToken();
         $dacSubmission = $this->getDatasetPolicy($auth, $datasetId);
+        // $studyId = $this->db->queryFirstField(
+        //     'SELECT dataset_view.study_id
+        //      FROM dataset_view
+        //      WHERE dataset_view.id = %s',
+        //     $datasetId
+        // );
 
-        $studyId = $this->db->queryFirstField(
-            'SELECT dataset_view.study_id
-             FROM dataset_view
-             WHERE dataset_view.id = %s',
-            $datasetId
-        );
-
-        if (!$dacSubmission['success'] || !isset($dacSubmission['content']['id']) || !$dacSubmission['content']['id']) {
+        if (!$dacSubmission['success'] || !isset($dacSubmission['content']['id']) || !$dacSubmission['content']['id'] || (isset($dacSubmission['content']) && $dacSubmission['content']['status']??"" == 'revoked')) {
             $submissionBody = [
                 'datasetID' => $datasetId,
-                'externalID' => $studyId,
+                'externalID' => $relationshipId,
                 'policyID' => $policyId,
             ];
-
             $response = $this->httpClient->request(
                 'POST',
                 $_ENV['DAC_API'] . '/submissions',
@@ -389,13 +385,11 @@ class PolicyService
                     'body' => json_encode($submissionBody),
                 ]
             );
-
             $statusCode = $response->getStatusCode();
-
             if ($statusCode < 200 || $statusCode >= 300) {
                 return array(
                     'success' => false,
-                    "error"   => $response->toArray(),
+                    "error"   => $response->toArray(false),
                     "status"  => $statusCode
                 );
             }
@@ -417,10 +411,9 @@ class PolicyService
     ): array {
 
         $token = $auth->getBearerToken();
-
         $response = $this->httpClient->request(
             'GET',
-            $_ENV['DAC_API'] . '/policies/' . $policyId . '/' . $form,
+            $_ENV['DAC_API'] . '/policies/' . rawurlencode($policyId) . '/' . rawurlencode($form),
             [
                 'headers' => [
                     'Content-Type'  => 'application/json',
@@ -461,6 +454,6 @@ class PolicyService
             throw new \Exception('No policy attached to this dataset', 500);
         }
 
-        return $this->getPolicyForm($auth, $datasetId, $policyId, 'daa-form');
+        return $this->getPolicyForm($auth, $datasetId, $policyId, 'requester-form');
     }
 }

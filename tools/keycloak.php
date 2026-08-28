@@ -9,9 +9,12 @@ if (file_exists(dirname(__DIR__) . "/.env")) {
     $dotenv->load();
 }
 
-$KEYCLOAK_SECRET = $_SERVER['KEYCLOAK_SECRET'];
+// This tool calls Keycloak's admin REST API (users/roles/groups/clients), which
+// needs a service-account-capable client - the frontend's client_id (fega-sp) isn't
+// configured for client_credentials and gets rejected with unauthorized_client.
+$KEYCLOAK_SECRET = $_SERVER['KEYCLOAK_DAC_SECRET'];
 $KEYCLOAK_REALM = $_SERVER['KEYCLOAK_REALM'];
-$KEYCLOAK_CLIENT_ID = $_SERVER['KEYCLOAK_CLIENT_ID'];
+$KEYCLOAK_CLIENT_ID = $_SERVER['KEYCLOAK_DAC_CLIENT_ID'];
 $KEYCLOAK_URL = rtrim($_SERVER['KEYCLOAK_URL'], '/') . "/";
 
 if (!defined("KEYCLOAK_URL")) {
@@ -54,8 +57,8 @@ function getKeyCloakTokens()
 {
     $data = array(
         'grant_type' => 'client_credentials',
-        'client_id' => KEYCLOAK_CLIENT_ID,
-        'client_secret' => KEYCLOAK_SECRET
+        'client_id' => KEYCLOAK_DAC_CLIENT_ID,
+        'client_secret' => KEYCLOAK_DAC_SECRET
     );
 
     $fields_string = http_build_query($data);
@@ -80,7 +83,7 @@ function getKeyCloakTokens()
 
     if (isset($res->error)) {
         $mes = (isset($res->error_message)) ? $res->error_message : $res->error;
-        throw new Exception("Keycloak error: " . $mes, 404);
+        throw new Exception("Keycloak error: " . $mes." (".KEYCLOAK_CLIENT_ID.")", 404);
     }
 
     $refresh_token = (isset($res->refresh_token)) ? $res->refresh_token : $res->access_token;

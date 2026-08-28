@@ -5,9 +5,14 @@ namespace App\Service\File;
 use Exception;
 use MeekroDB;
 use PhpOffice\PhpSpreadsheet\IOFactory;
+use PhpOffice\PhpSpreadsheet\Reader\Exception as ReaderException;
 
 class FileImportHelper
 {
+    private const MAX_IMPORT_FILE_SIZE = 50 * 1024 * 1024; // 50 MB
+    private const MAX_IMPORT_ROWS = 20000;
+    private const MAX_IMPORT_COLUMNS = 200;
+
     private MeekroDB $db;
 
     public function __construct(MeekroDB $db)
@@ -19,6 +24,11 @@ class FileImportHelper
     {
         if (!file_exists($inputFileName) || !is_readable($inputFileName)) {
             throw new Exception("Error: File '{$inputFileName}' cannot be read", 500);
+        }
+
+        $fileSize = filesize($inputFileName);
+        if ($fileSize === false || $fileSize > self::MAX_IMPORT_FILE_SIZE) {
+            throw new Exception("Error: file exceeds the maximum allowed import size of " . (self::MAX_IMPORT_FILE_SIZE / 1024 / 1024) . " MB", 413);
         }
 
         $json = $this->db->queryFirstField("SELECT properties FROM resource_type WHERE name = %s", $resourceType);
@@ -49,8 +59,26 @@ class FileImportHelper
             throw new Exception("Cannot open file '{$tsvFileName}' for writing", 500);
         }
 
-        $spreadsheet = IOFactory::load($inputFileName);
+        $extension = strtolower(pathinfo($inputFileName, PATHINFO_EXTENSION));
+        $readerType = $extension === 'xls' ? 'Xls' : 'Xlsx';
+
+        try {
+            $reader = IOFactory::createReader($readerType);
+        } catch (ReaderException $e) {
+            throw new Exception("Error: unsupported spreadsheet format '{$extension}'", 400);
+        }
+        if (!$reader->canRead($inputFileName)) {
+            throw new Exception("Error: file is not a valid {$readerType} spreadsheet", 400);
+        }
+        $reader->setReadDataOnly(true);
+        $reader->setReadFilter(new BoundedCellReadFilter(self::MAX_IMPORT_ROWS, self::MAX_IMPORT_COLUMNS));
+
+        $spreadsheet = $reader->load($inputFileName);
         $sheetData = $spreadsheet->getActiveSheet()->toArray(null, true, true, false);
+
+        if (count($sheetData) >= self::MAX_IMPORT_ROWS) {
+            throw new Exception("Error: file exceeds the maximum supported " . self::MAX_IMPORT_ROWS . " rows", 413);
+        }
 
         $headerRowIndex = -1;
         $headers = [];

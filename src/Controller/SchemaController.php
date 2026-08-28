@@ -1,7 +1,5 @@
 <?php
-
 namespace App\Controller;
-
 use Symfony\Bundle\FrameworkBundle\Controller\AbstractController;
 use Symfony\Component\HttpFoundation\JsonResponse;
 use Symfony\Component\HttpFoundation\Request;
@@ -36,8 +34,13 @@ class SchemaController extends AbstractController
     )]
     public function getSchemas(): JsonResponse
     {
+        // This endpoint is intentionally public - the frontend's metadata documentation
+        // page (allowAnonymous route) fetches it to render form schemas without a login.
+        // Only the columns the frontend actually consumes (name, properties) are
+        // projected; the rest of resource_type (public_id_prefix, internal rank/prefix,
+        // etc.) stayed unnecessarily exposed before (security audit M-9).
         $dbSchemas = $this->db->query(
-            "SELECT * FROM resource_type WHERE properties IS NOT NULL AND properties->'data_schema'->>'x-resource' IS NOT NULL"
+            "SELECT name, properties FROM resource_type WHERE properties IS NOT NULL AND properties->'data_schema'->>'x-resource' IS NOT NULL"
         );
         
         $schemas = [];

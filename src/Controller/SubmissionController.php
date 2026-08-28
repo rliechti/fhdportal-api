@@ -8,13 +8,13 @@ use App\Service\Dac\PolicyService;
 use App\Service\File\FileReadService;
 use App\Service\JsonSchema\Validator;
 use App\Service\PublicationService;
-use App\Service\RabbitMq\RabbitMqInterface;
 use App\Service\Resource\ResourceEditService;
 use App\Service\Resource\ResourceExportService;
 use App\Service\Resource\ResourceReadService;
 use App\Service\Resource\ResourceTemplateService;
 use App\Service\SubmissionService;
 use App\Service\Utility\GeneralHelperService;
+use App\Service\Validation\SubmissionHealthCheckService;
 use Exception;
 use MeekroDB;
 use OpenApi\Attributes as OA;
@@ -22,9 +22,14 @@ use Symfony\Bundle\FrameworkBundle\Controller\AbstractController;
 use Symfony\Component\HttpFoundation\BinaryFileResponse;
 use Symfony\Component\HttpFoundation\JsonResponse;
 use Symfony\Component\HttpFoundation\Request;
+use Symfony\Component\HttpFoundation\Response;
+use Symfony\Component\HttpFoundation\StreamedResponse;
+use Symfony\Component\HttpKernel\Exception\HttpException;
+use Symfony\Component\HttpKernel\Exception\HttpExceptionInterface;
 use Symfony\Component\HttpKernel\Exception\NotFoundHttpException;
 use Symfony\Component\Routing\Attribute\Route;
 use Symfony\Component\Serializer\SerializerInterface;
+use Psr\Log\LoggerInterface;
 use ZipArchive;
 
 #[Route('/api')]
@@ -40,12 +45,11 @@ class SubmissionController extends AbstractController
         private FileReadService $fileRead,
         private GeneralHelperService $helper,
         private MeekroDB $db,
-        private RabbitMqInterface $rabbitMq,
         private PolicyService $policy,
         private KeycloakService $keycloak,
-        private SubmissionService $submissionService
-    ) {
-    }
+        private SubmissionService $submissionService,
+        private SubmissionHealthCheckService $submissionHealthCheck
+    ) {}
 
     #[Route('/submissions', name: 'get_submissions', methods: ['GET'])]
     #[OA\Get(
@@ -70,7 +74,7 @@ class SubmissionController extends AbstractController
     )]
     public function getSubmissions(Request $request, Keycloak $auth, ResourceReadService $readResource): JsonResponse
     {
-        $status = $request->query->get('status') ?? 'draft,submitted';
+        $status = $request->query->get('status') ?? 'draft,revised,submitted,re-submitted';
         $submissions = $readResource->listResources($auth, 'Study', null, 'review', $status);
 
         if ($status === 'published') {
@@ -79,12 +83,34 @@ class SubmissionController extends AbstractController
                 'public_id'    => $s['public_id'],
                 'title'        => $s['title'],
                 'study_type'   => $s['properties']['study_type'] ?? null,
-                'released_date'=> $s['released_date'],
+                'released_date' => $s['released_date'],
                 'nb_datasets'  => (int)($s['nb_public_datasets'] ?? 0)
             ], $submissions);
         }
 
         return new JsonResponse($submissions);
+    }
+
+    /**
+     * Exceptions deliberately raised with an HTTP-range code (either a real
+     * HttpExceptionInterface, or this codebase's common `new Exception($msg, $httpCode)`
+     * convention) propagate with their original status and message - that message was
+     * authored to be shown. Anything else (a DB error, a null-dereference, ...) is logged
+     * in full and replaced with a generic message before it reaches the client
+     * (security audit H-8: these catch blocks used to echo $e->getMessage() verbatim
+     * under a hardcoded 500, regardless of what the exception actually carried).
+     */
+    private function rethrowSafely(\Throwable $e, LoggerInterface $logger, string $genericMessage): never
+    {
+        if ($e instanceof HttpExceptionInterface) {
+            throw $e;
+        }
+        $code = $e->getCode();
+        if ($code >= 400 && $code < 600) {
+            throw new HttpException($code, $e->getMessage(), $e);
+        }
+        $logger->error($genericMessage, ['exception' => $e]);
+        throw new HttpException(500, $genericMessage);
     }
 
     #[Route('/{resource_type}/template', name: 'download_template', methods: ['GET'])]
@@ -199,7 +225,14 @@ class SubmissionController extends AbstractController
     )]
     public function downloadCli(string $binary): BinaryFileResponse
     {
+
+        $binaries = array("fega-linux","fega-macos-arm","fega-macos-x64","fega-windows.exe");
+        if (!in_array($binary,$binaries,true)){
+            throw new NotFoundHttpException('CLI binary not valid: ' . $binary);
+        }
         $filepath = dirname(dirname(__DIR__)) . '/tools/fega-cli/' . $binary;
+
+
 
         if (!file_exists($filepath)) {
             throw new NotFoundHttpException('CLI binary not found: ' . $binary);
@@ -298,6 +331,53 @@ class SubmissionController extends AbstractController
         return new JsonResponse($submission);
     }
 
+    #[Route('/submissions/{study_id}/check', name: 'check_submission', methods: ['GET'])]
+    #[OA\Get(
+        path: '/api/submissions/{study_id}/check',
+        summary: 'Run a data integrity/consistency health check on a submission',
+        tags: ['Submissions'],
+        parameters: [
+            new OA\Parameter(
+                name: 'study_id',
+                in: 'path',
+                required: true,
+                schema: new OA\Schema(type: 'string')
+            )
+        ],
+        responses: [
+            new OA\Response(
+                response: 200,
+                description: 'Health check result',
+                content: new OA\JsonContent(
+                    type: 'object',
+                    properties: [
+                        new OA\Property(property: 'success', type: 'boolean'),
+                        new OA\Property(property: 'message', type: 'string'),
+                        new OA\Property(property: 'errors', type: 'array', items: new OA\Items(type: 'string')),
+                        new OA\Property(property: 'warnings', type: 'array', items: new OA\Items(type: 'string')),
+                        new OA\Property(property: 'issues', type: 'array', items: new OA\Items(type: 'object'))
+                    ]
+                )
+            ),
+            new OA\Response(response: 401, description: 'Unauthorized'),
+            new OA\Response(response: 404, description: 'Submission not found')
+        ]
+    )]
+    public function checkSubmission(Keycloak $auth, string $study_id): JsonResponse
+    {
+        if ($auth->isGuest()) {
+            return $this->json(['message' => 'Unauthorized'], 401);
+        }
+
+        $study = $this->resourceRead->getResource($auth, 'Study', $study_id, 'read');
+        if (isset($study['error'])) {
+            return $this->json($study['error'], $study['error']['status'] ?? 404);
+        }
+
+        $result = $this->submissionHealthCheck->check($study['id'], $study['properties']['public_id'] ?? null);
+        return new JsonResponse($result);
+    }
+
     #[Route('/pubmeds/{pmid}', name: 'get_pubmeds', methods: ['GET'])]
     #[OA\Get(
         path: '/api/pubmeds/{pmid}',
@@ -320,8 +400,11 @@ class SubmissionController extends AbstractController
             new OA\Response(response: 404, description: 'PubMed record not found')
         ]
     )]
-    public function getPubmeds(string $pmid): JsonResponse
+    public function getPubmeds(string $pmid, Keycloak $auth): JsonResponse
     {
+        if ($auth->isGuest()) {
+            return new JsonResponse(['message' => 'Unauthorized'], 401);
+        }
         $pubmeds = $this->publication->fetchPubmeds($pmid);
         return new JsonResponse($pubmeds);
     }
@@ -330,27 +413,100 @@ class SubmissionController extends AbstractController
     #[OA\Post(
         path: '/api/submissions/upload-study',
         summary: 'Upload new study from file',
+        description: 'Response is newline-delimited JSON (one JSON object per line): zero or more '
+            . '{"type":"progress","phase":"validating|importing","current":n,"total":n,"resource_type":"..."} '
+            . 'lines while processing, followed by a final '
+            . '{"type":"result","data":{...}} or {"type":"error","message":"..."} line.',
         tags: ['Submissions'],
         requestBody: new OA\RequestBody(
             required: true,
             content: new OA\JsonContent(type: 'object')
         ),
         responses: [
-            new OA\Response(response: 200, description: 'Study uploaded successfully'),
+            new OA\Response(response: 200, description: 'Newline-delimited JSON progress/result stream'),
             new OA\Response(response: 401, description: 'Unauthorized'),
             new OA\Response(response: 400, description: 'Invalid input')
         ]
     )]
-    public function uploadStudy(Request $request, Keycloak $auth): JsonResponse
+    public function uploadStudy(Request $request, Keycloak $auth, LoggerInterface $logger): Response
     {
         if ($auth->isGuest()) {
-            return new JsonResponse(['message' => 'Unauthorized'], 401);
+            $response = new StreamedResponse(function () {
+                echo json_encode(['type' => 'error', 'message' => 'Unauthorized']) . "\n";
+            }, 401);
+            $response->headers->set('Content-Type', 'application/x-ndjson');
+            return $response;
         }
 
         $content = $request->request->all();
         $project_dir = $this->getParameter('kernel.project_dir');
-        $uploadResponse = $this->resourceEdit->uploadResources($auth, 'new', $request, $project_dir, $content);
-        return new JsonResponse($uploadResponse,200,[],true);
+
+        $response = new StreamedResponse(function () use ($request, $auth, $project_dir, $content, $logger) {
+            $emit = function (array $event) {
+                echo json_encode($event) . "\n";
+                if (ob_get_level() > 0) {
+                    @ob_flush();
+                }
+                flush();
+            };
+
+            try {
+                $onProgress = function (string $phase, int $current, int $total, ?string $resourceType) use ($emit) {
+                    $emit([
+                        'type' => 'progress',
+                        'phase' => $phase,
+                        'current' => $current,
+                        'total' => $total,
+                        'resource_type' => $resourceType,
+                    ]);
+                };
+
+                $uploadResponse = $this->resourceEdit->uploadResources($auth, 'new', $request, $project_dir, $content, $onProgress);
+                $emit(['type' => 'result', 'data' => $this->normalizeUploadResult($uploadResponse)]);
+            } catch (Exception $e) {
+                // Same "only a deliberately client-facing message is shown" rule as
+                // rethrowSafely() - can't actually throw here, headers are already sent.
+                $code = $e->getCode();
+                if ($e instanceof HttpExceptionInterface) {
+                    $message = $e->getMessage();
+                } elseif ($code >= 400 && $code < 600) {
+                    $message = $e->getMessage();
+                } else {
+                    $logger->error('Study upload failed', ['exception' => $e]);
+                    $message = 'Unable to process upload';
+                }
+                $emit(['type' => 'error', 'message' => $message]);
+            }
+        });
+
+        // Progress is only useful if it reaches the browser incrementally: no gzip/proxy buffering.
+        $response->headers->set('Content-Type', 'application/x-ndjson');
+        $response->headers->set('X-Accel-Buffering', 'no');
+        $response->headers->set('Cache-Control', 'no-cache');
+        return $response;
+    }
+
+    /**
+     * uploadResources() returns a JsonResponse, a JSON string, or a raw array depending
+     * on which branch it took. Normalize all three into a plain array for the "result" event.
+     */
+    private function normalizeUploadResult(mixed $uploadResponse): array
+    {
+        if ($uploadResponse instanceof JsonResponse) {
+            $decoded = json_decode($uploadResponse->getContent(), true);
+            return [
+                'success' => false,
+                'message' => is_array($decoded) ? ($decoded['message'] ?? $uploadResponse->getContent()) : $uploadResponse->getContent(),
+            ];
+        }
+        if (is_string($uploadResponse)) {
+            $decoded = json_decode($uploadResponse, true);
+            return is_array($decoded) ? $decoded : ['success' => true, 'message' => $uploadResponse];
+        }
+        if (is_array($uploadResponse)) {
+            return $uploadResponse;
+        }
+        return ['success' => false, 'message' => 'Unexpected upload response'];
     }
 
     #[Route('/submissions', name: 'post_submission', methods: ['POST'])]
@@ -368,7 +524,7 @@ class SubmissionController extends AbstractController
             new OA\Response(response: 400, description: 'Invalid input')
         ]
     )]
-    public function postSubmission(Request $request, Keycloak $auth): JsonResponse
+    public function postSubmission(Request $request, Keycloak $auth, LoggerInterface $logger): JsonResponse
     {
         if ($auth->isGuest()) {
             return new JsonResponse(['message' => 'Unauthorized'], 401);
@@ -402,7 +558,7 @@ class SubmissionController extends AbstractController
 
             return new JsonResponse($result);
         } catch (Exception $e) {
-            return new JsonResponse(['error' => $e->getMessage()], 500);
+            $this->rethrowSafely($e, $logger, 'Unable to create submission');
         }
     }
 
@@ -429,7 +585,7 @@ class SubmissionController extends AbstractController
             new OA\Response(response: 400, description: 'Invalid input')
         ]
     )]
-    public function putSubmission(Request $request, Keycloak $auth, string $study_id): JsonResponse
+    public function putSubmission(Request $request, Keycloak $auth, string $study_id, LoggerInterface $logger): JsonResponse
     {
         if ($auth->isGuest()) {
             return new JsonResponse(['message' => 'Unauthorized'], 401);
@@ -462,9 +618,60 @@ class SubmissionController extends AbstractController
 
             return new JsonResponse($result);
         } catch (Exception $e) {
-            return new JsonResponse(['error' => $e->getMessage()], 500);
+            $this->rethrowSafely($e, $logger, 'Unable to update submission');
         }
     }
+
+    #[Route('/submissions/{study_id}/version', name: 'create_submission_version', methods: ['PUT'])]
+    #[OA\Put(
+        path: '/api/submissions/{study_id}/version',
+        summary: 'Register a new version of a submission',
+        tags: ['Submissions'],
+        parameters: [
+            new OA\Parameter(
+                name: 'study_id',
+                in: 'path',
+                required: true,
+                schema: new OA\Schema(type: 'string')
+            )
+        ],
+        requestBody: new OA\RequestBody(
+            required: true,
+            content: new OA\JsonContent(type: 'object')
+        ),
+        responses: [
+            new OA\Response(response: 200, description: 'Study version created successfully'),
+            new OA\Response(response: 401, description: 'Unauthorized'),
+            new OA\Response(response: 400, description: 'Invalid input')
+        ]
+    )]
+    public function createSubmissionVersion(Request $request, Keycloak $auth, string $study_id, LoggerInterface $logger): JsonResponse
+    {
+        if ($auth->isGuest()) {
+            return new JsonResponse(['message' => 'Unauthorized'], 401);
+        }
+
+        try {
+            $resourceId = $this->resourceEdit->setResourceStatus($auth, $study_id, 'REV');
+
+            if ($resourceId) {
+                $resources = $this->resourceRead->listResources(
+                    $auth,
+                    'Study',
+                    null,
+                    'review',
+                    null,
+                    $resourceId
+                );
+                return new JsonResponse($resources[0]);
+            }
+
+            return new JsonResponse(null, 204);
+        } catch (Exception $e) {
+            $this->rethrowSafely($e, $logger, 'Unable to create submission version');
+        }
+    }
+
 
     #[Route('/submissions/{study_id}', name: 'patch_submission', methods: ['PATCH'])]
     #[OA\Patch(
@@ -493,7 +700,8 @@ class SubmissionController extends AbstractController
         Request $request,
         Keycloak $auth,
         Validator $validator,
-        string $study_id
+        string $study_id,
+        LoggerInterface $logger
     ): JsonResponse {
         if ($auth->isGuest()) {
             return $this->json(['message' => 'Unauthorized'], 401);
@@ -504,16 +712,37 @@ class SubmissionController extends AbstractController
         $field = $this->helper->checkUuid($study_id) ? 'study_id' : 'study_public_id';
 
         try {
-            $this->resourceEdit->patchResource($study_id, $patch, $auth);
+            $status = $patch['status_type_id'] ?? null;
 
+            $oldStatus = null;
+            if ($status === 'SUB' || $status === 'RES') {
+                $resolved = $this->resourceRead->getResource($auth, 'Study', $study_id, 'edit');
+                if (isset($resolved['error'])) {
+                    return $this->json($resolved['error'], $resolved['error']['status'] ?? 403);
+                }
+                $health = $this->submissionHealthCheck->check($resolved['id'], $resolved['properties']['public_id'] ?? null);
+                if (!$health['success']) {
+                    return $this->json($health, 400);
+                }
+
+                $dbField = $this->helper->checkUuid($study_id) ? 'id' : "properties->>'public_id'";
+                $oldStatus = $this->db->queryFirstField(
+                    "SELECT status_type_id FROM resource WHERE $dbField = %s",
+                    $study_id
+                );
+            }
+
+            $this->resourceEdit->patchResource($study_id, $patch, $auth);
             if (!isset($patch['status_type_id'])) {
                 return $this->json(null, 204);
             }
 
-            $status = $patch['status_type_id'];
-            if ($status === 'SUB') {
+            if ($status === 'SUB' || $status === 'RES') {
                 $result = $this->submissionService->handleSubmission($auth, $study_id, $field, $user);
                 if (!$result['success']) {
+                    if ($oldStatus) {
+                        $this->resourceEdit->setResourceStatus($auth, $study_id, $oldStatus);
+                    }
                     return $this->json($result['error'], $result['status']);
                 }
             } elseif (!in_array($status, ['PUB', 'VER'])) {
@@ -522,7 +751,10 @@ class SubmissionController extends AbstractController
 
             return $this->json(null, 204);
         } catch (\Throwable $e) {
-            return $this->json(['error' => $e->getMessage()], 500);
+            if (!empty($oldStatus)) {
+                $this->resourceEdit->setResourceStatus($auth, $study_id, $oldStatus);
+            }
+            $this->rethrowSafely($e, $logger, 'Unable to update submission status');
         }
     }
 
@@ -570,7 +802,7 @@ class SubmissionController extends AbstractController
             new OA\Response(response: 200, description: 'User added successfully')
         ]
     )]
-    public function postSubmissionUser(string $study_id, Request $request, Keycloak $auth): JsonResponse
+    public function postSubmissionUser(string $study_id, Request $request, Keycloak $auth, LoggerInterface $logger): JsonResponse
     {
         if ($auth->isGuest()) {
             return new JsonResponse(['message' => 'Unauthorized'], 401);
@@ -582,7 +814,7 @@ class SubmissionController extends AbstractController
             $study_user_view = $this->resourceEdit->editResourceUser($study_id, $user, $auth);
             return new JsonResponse($study_user_view);
         } catch (Exception $e) {
-            return new JsonResponse(['error' => $e->getMessage()], 500);
+            $this->rethrowSafely($e, $logger, 'Unable to add user to submission');
         }
     }
 
@@ -609,13 +841,14 @@ class SubmissionController extends AbstractController
             new OA\Response(response: 200, description: 'User removed successfully')
         ]
     )]
-    public function deleteSubmissionUser(string $study_id, string $user_id): JsonResponse
+    public function deleteSubmissionUser(string $study_id, string $user_id, Keycloak $auth, LoggerInterface $logger): JsonResponse
     {
         try {
-            $study_user_view = $this->resourceEdit->deleteResourceUser($study_id, $user_id);
+             if ($auth->isGuest()) return new JsonResponse(['message'=>'Unauthorized'], 401);
+            $study_user_view = $this->resourceEdit->deleteResourceUser($study_id, $user_id, $auth);
             return new JsonResponse($study_user_view);
         } catch (Exception $e) {
-            return new JsonResponse(['error' => $e->getMessage()], 500);
+            $this->rethrowSafely($e, $logger, 'Unable to remove user from submission');
         }
     }
 
@@ -641,7 +874,7 @@ class SubmissionController extends AbstractController
             new OA\Response(response: 401, description: 'Unauthorized')
         ]
     )]
-    public function getRawFiles(string $study_id, Request $request, Keycloak $auth): JsonResponse
+    public function getRawFiles(string $study_id, Request $request, Keycloak $auth, LoggerInterface $logger): JsonResponse
     {
         if ($auth->isGuest()) {
             return new JsonResponse(['message' => 'Unauthorized'], 401);
@@ -651,7 +884,7 @@ class SubmissionController extends AbstractController
             $files = $this->fileRead->getRawFiles($study_id, $auth);
             return new JsonResponse($files);
         } catch (Exception $e) {
-            return new JsonResponse(['error' => $e->getMessage()], 500);
+            $this->rethrowSafely($e, $logger, 'Unable to retrieve raw files');
         }
     }
 
@@ -677,7 +910,7 @@ class SubmissionController extends AbstractController
             new OA\Response(response: 401, description: 'Unauthorized')
         ]
     )]
-    public function getAnalysisFiles(string $study_id, Request $request, Keycloak $auth): JsonResponse
+    public function getAnalysisFiles(string $study_id, Request $request, Keycloak $auth, LoggerInterface $logger): JsonResponse
     {
         if ($auth->isGuest()) {
             return new JsonResponse(['message' => 'Unauthorized'], 401);
@@ -687,7 +920,7 @@ class SubmissionController extends AbstractController
             $files = $this->fileRead->getAnalysisFiles($study_id, $auth);
             return new JsonResponse($files);
         } catch (Exception $e) {
-            return new JsonResponse(['error' => $e->getMessage()], 500);
+            $this->rethrowSafely($e, $logger, 'Unable to retrieve analysis files');
         }
     }
 }

@@ -22,7 +22,7 @@ class NullRabbitMq implements RabbitMqInterface
         // No-op: RabbitMQ is disabled
     }
 
-    public function permissionDataset(array $params): array
+    public function requestDownload(array $params): array
     {
         return [
             'status'    => 'success',
@@ -30,4 +30,19 @@ class NullRabbitMq implements RabbitMqInterface
             'exit_code' => 200,
         ];
     }
+
+    public function revokeDownload(array $params): array
+    {
+        return [
+            'status'    => 'success',
+            'message'   => 'RabbitMQ is disabled',
+            'exit_code' => 200,
+        ];
+    }
+
+    public function refreshRequestTokens(string $correlation_id, string $email): void
+    {
+        // No-op: RabbitMQ is disabled
+    }
+
 }

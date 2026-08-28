@@ -20,10 +20,10 @@ use Symfony\Component\Validator\Validator\ValidatorInterface;
 final class UserController extends AbstractController
 {
     public function __construct(
-        private readonly UserReadService $userRead,
-        private readonly UserRoleReadService $roleRead,
-        private readonly UserRoleRequestService $roleRequest,
-        private readonly UserKeyService $userKey
+        private UserReadService $userRead,
+        private UserRoleReadService $roleRead,
+        private UserRoleRequestService $roleRequest,
+        private UserKeyService $userKey
     ) {
     }
 
@@ -72,7 +72,7 @@ final class UserController extends AbstractController
         if ($auth->isGuest()) {
             return $this->json(['message' => 'Unauthorized'], 401);
         }
-
+        if (!$auth->isAdmin()) return new JsonResponse(['message'=>'Forbidden'], 403);
         $email = $request->query->get('email');
         $users = $this->userRead->findUsers(email: $email);
 

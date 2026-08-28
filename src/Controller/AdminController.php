@@ -42,7 +42,7 @@ class AdminController extends AbstractController
     )]
     public function getAllUsers(): JsonResponse
     {
-        if (!$this->auth->hasRole('admin-fega')) {
+        if (!$this->auth->isAdmin()) {
             return $this->json(['message' => 'Unauthorized'], 401);
         }
 
@@ -67,7 +67,7 @@ class AdminController extends AbstractController
     )]
     public function getRoles(): JsonResponse
     {
-        if (!$this->auth->hasRole('admin-fega')) {
+        if (!$this->auth->isAdmin()) {
             return $this->json(['message' => 'Unauthorized'], 401);
         }
 
@@ -104,7 +104,7 @@ class AdminController extends AbstractController
     )]
     public function setRoles(Request $request, string $user_id): JsonResponse
     {
-        if (!$this->auth->hasRole('admin-fega')) {
+        if (!$this->auth->isAdmin()) {
             return $this->json(['message' => 'Unauthorized'], 401);
         }
 
@@ -129,6 +129,10 @@ class AdminController extends AbstractController
     )]
     public function getAllRequests(Request $request, Keycloak $auth, SerializerInterface $serializer, DatasetRequestService $dac): JsonResponse
     {
+        if (!$this->auth->isAdmin()) {
+            return $this->json(['message' => 'Unauthorized'], 401);
+        }
+
         $result = $dac->getAllRequests($auth);
         if ($result['status'] !== 'success') {
             return new JsonResponse([$result['message']], $result['exit_code']);
@@ -136,36 +140,27 @@ class AdminController extends AbstractController
         return new JsonResponse($result['content'], $result['exit_code']);
     }
 
-    #[Route('/requests/{request_id}', name: 'patch_request', methods: ['PATCH'])]
-    #[OA\Patch(
-        path: '/api/admin/requests/{request_id}',
-        summary: 'Update dataset request',
-        tags: ['Requests'],
-        parameters: [
-            new OA\Parameter(
-                name: 'request_id',
-                in: 'path',
-                required: true,
-                schema: new OA\Schema(type: 'string')
-            )
-        ],
-        requestBody: new OA\RequestBody(
-            required: true,
-            content: new OA\JsonContent(type: 'object')
-        ),
+    #[Route('/datasets', name: 'get_all_datasets', methods: ['GET'])]
+    #[OA\Get(
+        path: '/api/admin/datasets',
+        summary: 'Get all datasets',
+        tags: ['datasets'],
         responses: [
             new OA\Response(
                 response: 200,
-                description: 'Request updated successfully',
-                content: new OA\JsonContent(type: 'object')
+                description: 'List of all datasets to be reviewed',
+                content: new OA\JsonContent(type: 'array', items: new OA\Items(type: 'object'))
             )
         ]
     )]
-    public function patchRequest(Request $request, Keycloak $auth, SerializerInterface $serializer, DatasetRequestService $dac, string $request_id): JsonResponse
+    public function getAlldatasets(Keycloak $auth): JsonResponse
     {
-        $content = $request->getContent();
-        $params = json_decode($content, true);
-        $result = $dac->patchRequest($auth, $request_id, $params);
+
+        if (!$this->auth->isAdmin()) {
+            return $this->json(['message' => 'Unauthorized'], 401);
+        }
+
+        $result = $this->adminService->getDatasets($auth);
         if ($result['status'] !== 'success') {
             return new JsonResponse([$result['message']], $result['exit_code']);
         }
