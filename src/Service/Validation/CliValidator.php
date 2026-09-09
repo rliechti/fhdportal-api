@@ -278,9 +278,18 @@ class CliValidator
 
 		if($resourceType === 'SubmissionBundle'){
 			$json_output = json_decode($output, true);
-			$json_output['success'] = false;
-			return $json_output;
-		} 
+			if (json_last_error() === JSON_ERROR_NONE && is_array($json_output)) {
+				$json_output['success'] = false;
+				return $json_output;
+			}
+			$message = trim($output . "\n" . $errorOutput);
+			return [
+				'success' => false,
+				'message' => $message !== '' ? $message : 'Validation failed',
+				'errors' => $message !== '' ? [$message] : ['Unknown validation error'],
+				'exit_code' => $process->getExitCode(),
+			];
+		}
 
         if ($outputFormat === 'json' && !empty($output)) {
             $parsedOutput = json_decode($output, true);
