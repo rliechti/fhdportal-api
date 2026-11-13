@@ -10,6 +10,12 @@ nelmio_cors:
         max_age: 3600
 
     paths:
+        # The Beacon is open and read-only: browsers of any site may query it (no credentials are involved).
+        '^/api/beacon':
+            allow_origin: ['*']
+            origin_regex: false
+            allow_methods: ['GET', 'OPTIONS']
+            allow_headers: ['Content-Type', 'Accept']
         '^/api/':  # Match /api/schemas exactly
             allow_origin: ['%env(CORS_ALLOW_ORIGIN)%']
             # ... rest inherits
