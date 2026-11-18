@@ -258,6 +258,23 @@ class DatasetRequestService
         );
     }
 
+    /**
+     * May the caller open and send the form of this DAC-portal request?
+     *
+     * The caller does when they own it here. A request that this portal does not know yet may be opened by anybody who has its
+     * id: it is a request the DAC portal has just created, and the portal only knows it after the first PATCH has registered it
+     * for its requester (the owner is the user whose token that PATCH carries, and the DAC portal answers the call with the
+     * same token, so it is the one that refuses somebody else's request). Once the request is known, only its owner passes.
+     */
+    public function mayAccessRequest(Keycloak $auth, string $dacRequestId): bool
+    {
+        if ($this->isOwnedByCaller($auth, $dacRequestId)) {
+            return true;
+        }
+
+        return !$this->db->queryFirstField("SELECT id FROM dataset_requests WHERE properties->>'dac_request_id' = %s", $dacRequestId);
+    }
+
     public function updateRequestStatusByDacId(string $dacRequestId, string $status): void
     {
         $this->db->query(

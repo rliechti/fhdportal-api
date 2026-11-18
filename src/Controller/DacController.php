@@ -175,7 +175,7 @@ class DacController extends AbstractController
         if (!$helper->checkUuid($id)) {
             return new JsonResponse(['message' => 'Invalid data request id'], 400);
         }
-        if (!$auth->isAdmin() && !$datasetRequestService->isOwnedByCaller($auth, $id)) {
+        if (!$auth->isAdmin() && !$datasetRequestService->mayAccessRequest($auth, $id)) {
             return new JsonResponse(['message' => 'Forbidden'], 403);
         }
         $result = $dac->getDataRequestForm($auth, $id);
@@ -219,7 +219,7 @@ class DacController extends AbstractController
         if (!$helper->checkUuid($id)) {
             return new JsonResponse(['message' => 'Invalid data request id'], 400);
         }
-        if (!$auth->isAdmin() && !$datasetRequestService->isOwnedByCaller($auth, $id)) {
+        if (!$auth->isAdmin() && !$datasetRequestService->mayAccessRequest($auth, $id)) {
             return new JsonResponse(['message' => 'Forbidden'], 403);
         }
 
@@ -321,7 +321,7 @@ class DacController extends AbstractController
         if (!$helper->checkUuid($id)) {
             return new JsonResponse(['message' => 'Invalid data request id'], 400);
         }
-        if (!$auth->isAdmin() && !$datasetRequestService->isOwnedByCaller($auth, $id)) {
+        if (!$auth->isAdmin() && !$datasetRequestService->mayAccessRequest($auth, $id)) {
             return new JsonResponse(['message' => 'Forbidden'], 403);
         }
         $result = $dac->downloadDataRequestDaa($auth, $id);
