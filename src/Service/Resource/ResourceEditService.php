@@ -842,10 +842,12 @@ final class ResourceEditService
 
         $this->helper->createDirectory($destination, true);
 
-        $filePath = $destination . "upload_" . date('YmdHis') . ".json";
+        // One file per edit. The name must be unique: with a name made of the second only, two edits of the same study within
+        // one second shared a file, which then held two JSON documents and was refused as an unsupported format.
+        $filePath = $destination . "upload_" . date('YmdHis') . "_" . bin2hex(random_bytes(4)) . ".json";
 
-        // Append JSON encoded resource to file
-        file_put_contents($filePath, json_encode($resource), FILE_APPEND);
+        // Write the JSON encoded resource
+        file_put_contents($filePath, json_encode($resource), LOCK_EX);
 
         // Import the resource
         $result = $this->importService->importResource($studyId, $filePath, $user['email'], $resourceType, +$user['id']);
