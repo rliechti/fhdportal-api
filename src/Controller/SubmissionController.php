@@ -301,6 +301,10 @@ class SubmissionController extends AbstractController
     public function getSubmission(Keycloak $auth, ResourceReadService $readResource, string $study_id): JsonResponse
     {
         $submission = $readResource->getResource($auth, 'Study', $study_id, 'read');
+        if (isset($submission['error'])) {
+            // not a 200 with an error object in the body
+            return $this->json($submission['error'], $submission['error']['status'] ?? 404);
+        }
 
         // Categorize relation types efficiently
         $typeCategories = [

@@ -15,6 +15,21 @@ class ExceptionListener
         $this->logger = $logger;
     }
 
+    /**
+     * The services throw a plain \Exception whose code is the HTTP status of the refusal (new Exception("Unauthorized", 401)).
+     * Only such exceptions, and only for a client error, give their status: any other exception (a library, a database) stays
+     * a 500 whatever its code, which may mean something else.
+     */
+    private function statusOfApplicationException(\Throwable $exception): int
+    {
+        $code = $exception->getCode();
+        if (get_class($exception) === \Exception::class && is_int($code) && $code >= 400 && $code < 500) {
+            return $code;
+        }
+
+        return 500;
+    }
+
     public function onKernelException(ExceptionEvent $event)
     {
         $exception = $event->getThrowable();
@@ -22,7 +37,7 @@ class ExceptionListener
         // Return sanitized error to user
         $statusCode = $exception instanceof HttpExceptionInterface
             ? $exception->getStatusCode()
-            : 500;
+            : $this->statusOfApplicationException($exception);
 
         $limitCode = ($_ENV['APP_ENV'] !== 'dev') ? 500 : 5000;
         $payload = ['code' => $statusCode];
