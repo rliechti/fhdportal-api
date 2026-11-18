@@ -122,13 +122,20 @@ class SubmissionHealthCheckService
         return $map;
     }
 
+    /**
+     * A rejected resource that is still linked to the study blocks the submission.
+     *
+     * A deleted resource does not: deleting only sets its status (the row and its relationship stay), and every other check
+     * ignores inactive resources. What would be wrong is a live resource that still points at a deleted one, which
+     * checkCrossReferences reports.
+     */
     private function checkDeletedButLinked(array $descendants, array &$errors, array &$issues): void
     {
         foreach ($descendants as $r) {
-            if (!in_array($r['status_type_id'], self::INACTIVE_STATUSES, true)) {
+            if ($r['status_type_id'] !== 'REJ') {
                 continue;
             }
-            $verb = $r['status_type_id'] === 'DEL' ? 'deleted' : 'rejected';
+            $verb = 'rejected';
             $message = "{$r['resource_type']} {$r['public_id']} is linked to the study but has been $verb";
             $errors[] = $message;
             $issues[] = $this->issue('error', 'deleted_but_linked', $r, $message);
