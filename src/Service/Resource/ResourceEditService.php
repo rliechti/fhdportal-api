@@ -1034,6 +1034,12 @@ final class ResourceEditService
         );
 
         foreach ($children_resource_ids as $child_resource_id) {
+            // Deleting only sets the status: the row and its relationship stay. A deleted part must stay deleted when the status of
+            // the whole changes (submission, approval, publication, rejection), or it would come back, and be published.
+            if ($status_id != 'DEL'
+                && $this->db->queryFirstField("SELECT status_type_id FROM resource WHERE id = %s", $child_resource_id) === 'DEL') {
+                continue;
+            }
             // When deleting, check if other relationships prevent status change
             if ($status_id == 'DEL') {
                 $other_relationships = $this->db->queryFirstColumn(
@@ -1211,7 +1217,8 @@ final class ResourceEditService
                   FROM
                   resource AS datasets
                   INNER JOIN relationship_view ON datasets.id = relationship_view.domain_resource_id and relationship_view.domain_type = 'Dataset' and relationship_view.range_type = 'Study'
-                  WHERE relationship_view.range_resource_id = %s",
+                  WHERE relationship_view.range_resource_id = %s
+                      AND datasets.status_type_id <> 'DEL'",
                 $studyId
             );            
         }
@@ -1275,7 +1282,8 @@ final class ResourceEditService
                       FROM
                       resource AS datasets
                       INNER JOIN relationship_view ON datasets.id = relationship_view.domain_resource_id and relationship_view.domain_type = 'Dataset' and relationship_view.range_type = 'Study'
-                      WHERE relationship_view.range_resource_id = %s",
+                      WHERE relationship_view.range_resource_id = %s
+                      AND datasets.status_type_id <> 'DEL'",
                     $studyId
                 );
                 $allStudyDatasetsAreApr = true;
