@@ -1,0 +1,43 @@
+### Project ###
+
+# Dependencies
+vendor/*
+
+# Configuration
+config/secrets/prod/prod.decrypt.private.php
+
+# Transient files
+var/*
+
+# Assets
+public/bundles/*
+
+
+### Development Environment ###
+
+# VisualStudioCode
+.vscode/*
+
+# Git
+.git
+**/.gitignore
+
+# Docker
+**/.dockerignore
+Dockerfile
+compose.yaml
+
+
+### Operating System ###
+
+# Linux
+*~
+**/.cache
+**/.directory
+
+# macOS
+**/.DS_Store
+
+# Windows
+**/Thumbs.db
+**/[Dd]esktop.ini
